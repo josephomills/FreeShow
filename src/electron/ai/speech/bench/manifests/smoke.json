@@ -1,0 +1,24 @@
+{
+    "id": "smoke-librispeech-v1",
+    "description": "Two LibriSpeech clips shipped with the sherpa-onnx Nemotron model repo. Read speech, clean, no scripture references - a sanity anchor, not a product metric. If WER here is not close to published LibriSpeech numbers, the harness is broken rather than the engine. Fetch with: npm run bench:fixtures",
+    "fixtures": [
+        {
+            "id": "ls-0",
+            "tier": "public",
+            "file": "smoke/0.wav",
+            "durationMs": 6625,
+            "transcript": "AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS",
+            "timingSource": "none",
+            "expected": []
+        },
+        {
+            "id": "ls-1",
+            "tier": "public",
+            "file": "smoke/1.wav",
+            "durationMs": 16715,
+            "transcript": "GOD AS A DIRECT CONSEQUENCE OF THE SIN WHICH MAN THUS PUNISHED HAD GIVEN HER A LOVELY CHILD WHOSE PLACE WAS ON THAT SAME DISHONOURED BOSOM TO CONNECT HER PARENT FOR EVER WITH THE RACE AND DESCENT OF MORTALS AND TO BE FINALLY A BLESSED SOUL IN HEAVEN",
+            "timingSource": "none",
+            "expected": []
+        }
+    ]
+}

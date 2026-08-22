@@ -1,7 +1,7 @@
 import { app } from "electron"
 import fs from "fs"
 import path from "path"
-import { NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE } from "../../setup/models/nemotron"
+import { NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE } from "../../setup/models/nemotronFiles"
 
 export interface NemotronModelPaths {
     encoder: string
