@@ -58,7 +58,9 @@ export class AudioClock {
     private pushedSamples = 0
 
     get audioPushedMs(): number {
-        return (this.pushedSamples / BENCH_SAMPLE_RATE) * 1000
+        // rounded: a trailing partial chunk otherwise yields 1400.0000000000073, and that float
+        // noise propagates into every latency figure and every report column
+        return Math.round((this.pushedSamples / BENCH_SAMPLE_RATE) * 1000)
     }
 
     advance(samples: number) {

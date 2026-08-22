@@ -1,0 +1,354 @@
+// AI AUTO SCRIPTURE - streaming transcription over sherpa-onnx (NVIDIA Nemotron), cache-aware.
+//
+// The sibling driver.ts decodes each utterance in one batch on a FRESH stream, repeatedly. This
+// one keeps a SINGLE stream open for the whole session and feeds it only the new audio. Same
+// model, same VAD, same emitted segment shape - the difference is entirely in how the recognizer
+// is driven, and it is large. Measured on 120s of real preaching (bench/, AI_BENCH=1):
+//
+//                        driver.ts (batch)   this file (streaming)
+//   decode cost              0.21x realtime        0.059x realtime
+//   per-push p99 / max         468 / 607 ms            66 / 74 ms
+//
+// Three properties of the model make this work, all measured rather than assumed:
+//
+// 1. The encoder runs on a fixed grid: the first step needs 1300ms of buffered audio, every step
+//    after it fires 1120ms later (NEMOTRON_PRIMING_MS / NEMOTRON_CHUNK_SHIFT_MS, read from the
+//    ONNX metadata). Feeding a whole utterance at once and feeding it in 100ms pushes produce the
+//    IDENTICAL number of encoder steps - OnlineStream buffers internally. So batching bought
+//    nothing, while paying the 1300ms priming again on every single decode.
+//
+// 2. `getResult(stream).text` on a persistent stream is monotonic - always a prefix-extension of
+//    the previous value. Verified over 120s of continuous preaching without a single exception.
+//    Greedy RNN-T appends tokens frame by frame and cannot retract them. This is what removes the
+//    "two consecutive decodes must agree" rule: that rule was defending against revisions which
+//    only existed BECAUSE a fresh stream re-decoded the audio from scratch. Remove the cause and
+//    the defence is pure latency. `assertPrefix` below keeps a cheap guard in place anyway.
+//
+// 3. `reset(stream)` clears the hypothesis but KEEPS the encoder cache. Verified by decoding the
+//    same audio on a reset stream and on a brand-new one: they produce different text, so the
+//    reset stream is still carrying acoustic context. That is what lets an utterance boundary
+//    clear the transcript without re-paying the priming cost.
+//
+// Consequently the whole compensating apparatus in driver.ts - partial re-decodes, the agreement
+// rule and its backoff, seam stitching, soft splits, split overlap, preroll, the finalize pad,
+// the buffered utterance - has nothing left to compensate for and is absent here.
+//
+// What this does NOT change: greedy RNN-T is monotonic, so a word decoded wrong stays wrong.
+// There is no revision and no hotword biasing at any latency (sherpa's Nemotron transducer
+// supports greedy_search only - k2-fsa/sherpa-onnx#3572). Misheard biblical vocabulary is still
+// recovered downstream by scripture/detection/asrRepairs.ts and the quote matcher's phonetic
+// layer. And the 1120ms grid is baked into the ONNX export: no setting here moves it, but
+// lower-latency exports of the same NVIDIA weights exist (see setup/models/nemotronFiles.ts).
+
+import { NEMOTRON_CHUNK_SHIFT_MS } from "../../setup/models/nemotronFiles"
+import type { DriverCallbacks, TranscriberSegment, TranscriptionDriver } from "../types"
+import type { NemotronModelPaths } from "./manager"
+
+const SAMPLE_RATE = 16000
+
+// VAD tuning is carried over from driver.ts unchanged - it was tuned against live services and
+// none of the reasoning depends on how the recognizer is driven. A trailing word softened by room
+// acoustics can dip below the speech threshold, and the silence countdown then runs DURING the
+// word; a low threshold keeps quiet word endings counted as speech.
+const VAD_THRESHOLD = 0.3
+const VAD_MIN_SILENCE = 0.8
+const VAD_MIN_SPEECH = 0.15
+// only a ceiling on how long one hypothesis string may grow - text streams out continuously, so
+// unlike driver.ts this is not a decode-cost boundary and never slices a word out of a batch
+const VAD_MAX_SPEECH = 30
+
+// Real audio that must reach the recognizer after the VAD says speech ended, before the utterance
+// is closed and the stream reset. It has to cover a FULL chunk shift: the last word's audio only
+// influences the transcript once an encoder step consumes it, and a step fires every 1120ms.
+// driver.ts used 500ms here, which is less than one step - under a persistent stream that would
+// close before the final word's own chunk had ever run. Costs nothing to wait: the audio is being
+// decoded either way, there is no batch to assemble.
+const CLOSE_DEFER_SAMPLES = Math.ceil(((NEMOTRON_CHUNK_SHIFT_MS + 100) / 1000) * SAMPLE_RATE)
+
+// Silence pushed into the stream at stop(), so the last real audio gets an encoder step to land
+// in. Mid-session this is unnecessary - CLOSE_DEFER_SAMPLES already guarantees a step past the
+// speech end - but at stop() the audio simply ends, and whatever fell between the last step and
+// the end would otherwise never be decoded at all. The bench caught this as a dropped final word.
+const STOP_FLUSH_SAMPLES = CLOSE_DEFER_SAMPLES
+
+// While an utterance is open the trailing word is held back (it may be a mid-emission BPE
+// fragment). If the hypothesis then stops growing - a pause too short for the VAD to close on -
+// that word would wait indefinitely, which the bench measured as a 9s worst case. A full encoder
+// step with no new tokens means the decoder had its chance and produced nothing, so the word is
+// committed. Bounds tail latency at roughly two chunk shifts instead of leaving it unbounded.
+const STATIC_TAIL_SAMPLES = Math.ceil(((NEMOTRON_CHUNK_SHIFT_MS + 200) / 1000) * SAMPLE_RATE)
+
+interface StreamNemotronOptions extends DriverCallbacks {
+    paths: NemotronModelPaths
+    vadModelPath: string
+    /** Reported on every segment - the English model is monolingual, kept for the segment shape. */
+    language?: string
+    /** Injected by tests. Production loads the native addon lazily in start(). */
+    sherpa?: any
+}
+
+export class NemotronStreamDriver implements TranscriptionDriver {
+    private options: StreamNemotronOptions
+
+    private recognizer: any = null
+    private vad: any = null
+    /** ONE stream for the whole session. Recreating it is what the old path got wrong. */
+    private stream: any = null
+
+    private stopped = false
+    private totalSamples = 0
+
+    private inUtterance = false
+    /** Absolute sample index at which the open utterance must be closed, 0 when none is pending. */
+    private finalizeAtSample = 0
+
+    // Emission is tracked in CHARACTERS of the hypothesis, not words. Greedy RNN-T emits BPE
+    // pieces, so the trailing word grows in place ("Ephes" -> "Ephesians"); a word counter cannot
+    // tell that apart from a new word and would silently drop the completion.
+    private emittedChars = 0
+    private lastText = ""
+    private nextEmitStartMs = 0
+    /** Absolute sample index at which the hypothesis last got longer - drives the static-tail rule. */
+    private lastGrowthAtSample = 0
+
+    constructor(options: StreamNemotronOptions) {
+        this.options = options
+    }
+
+    async start(): Promise<void> {
+        if (this.stopped) throw new Error("NemotronStreamDriver has already been stopped")
+
+        // required lazily so the app still starts where the native addon fails to load
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const sherpa = this.options.sherpa || require("sherpa-onnx-node")
+        const { paths, vadModelPath } = this.options
+
+        this.recognizer = new sherpa.OnlineRecognizer({
+            // the encoder metadata declares feat_dim=128 and sherpa reads it from there, so this
+            // value is advisory - but a wrong one here is a landmine for any future re-export
+            featConfig: { sampleRate: SAMPLE_RATE, featureDim: 128 },
+            modelConfig: {
+                transducer: { encoder: paths.encoder, decoder: paths.decoder, joiner: paths.joiner },
+                tokens: paths.tokens,
+                numThreads: 2,
+                provider: "cpu",
+                debug: 0
+            },
+            // greedy is the only method this model supports, which also rules out hotword biasing
+            // (both live behind modified_beam_search) - see the file header
+            decodingMethod: "greedy_search",
+            // boundaries come from Silero. Sherpa's own endpointing counts trailing BLANK FRAMES
+            // from the decoder - it is not the energy gate driver.ts's header describes - but it
+            // can only be evaluated at encoder-step boundaries, so its resolution is one 1120ms
+            // chunk. Silero's 512-sample window is 32ms, and it also gates music and crowd noise.
+            enableEndpoint: false
+        })
+
+        this.stream = this.recognizer.createStream()
+
+        this.vad = new sherpa.Vad(
+            {
+                sileroVad: {
+                    model: vadModelPath,
+                    threshold: VAD_THRESHOLD,
+                    minSilenceDuration: VAD_MIN_SILENCE,
+                    minSpeechDuration: VAD_MIN_SPEECH,
+                    maxSpeechDuration: VAD_MAX_SPEECH,
+                    windowSize: 512
+                },
+                sampleRate: SAMPLE_RATE,
+                numThreads: 1,
+                provider: "cpu",
+                debug: 0
+            },
+            60
+        )
+    }
+
+    async stop(): Promise<void> {
+        if (this.stopped) return
+        this.stopped = true
+
+        // flush whatever was still being spoken so its text is not lost
+        try {
+            this.flushTail()
+            if (this.inUtterance) this.closeUtterance()
+        } catch (err) {
+            console.error("[nemotron] Failed to flush the final utterance:", err)
+        }
+
+        this.recognizer = null
+        this.vad = null
+        this.stream = null
+    }
+
+    pushAudio(buffer: Uint8Array): void {
+        if (this.stopped || !this.recognizer || !this.stream) return
+
+        const samples = int16ToFloat32(buffer)
+        if (!samples.length) return
+
+        try {
+            this.vad.acceptWaveform(samples)
+
+            // EVERY push reaches the recognizer, silence included. This is the invariant the whole
+            // file rests on: the encoder cache is only continuous if the audio is continuous, and
+            // skipping non-speech would re-introduce the priming cost at each utterance start.
+            this.stream.acceptWaveform({ sampleRate: SAMPLE_RATE, samples })
+            while (this.recognizer.isReady(this.stream)) this.recognizer.decode(this.stream)
+
+            this.totalSamples += samples.length
+
+            if (this.vad.isDetected()) {
+                if (!this.inUtterance) {
+                    this.inUtterance = true
+                    this.nextEmitStartMs = Math.max(this.nextEmitStartMs, this.currentMs())
+                }
+                // speech resumed inside the defer window - it was a pause, not an end
+                this.finalizeAtSample = 0
+            }
+
+            // drain the VAD's own queue; a close arms the deferred boundary
+            let closed = false
+            while (!this.vad.isEmpty()) {
+                this.vad.pop()
+                closed = true
+            }
+            if (closed && this.inUtterance && !this.finalizeAtSample) {
+                this.finalizeAtSample = this.totalSamples + CLOSE_DEFER_SAMPLES
+            }
+
+            if (this.finalizeAtSample && this.totalSamples >= this.finalizeAtSample) {
+                this.finalizeAtSample = 0
+                this.closeUtterance()
+            } else if (this.inUtterance) {
+                this.emitFromHypothesis(false)
+            }
+        } catch (err) {
+            this.options.onError(String((err as Error)?.message || err))
+        }
+    }
+
+    // EMISSION
+
+    private currentMs(): number {
+        return Math.round((this.totalSamples / SAMPLE_RATE) * 1000)
+    }
+
+    private readText(): string {
+        return ((this.recognizer.getResult(this.stream).text || "") as string).trim()
+    }
+
+    /**
+     * Push silence so the audio after the last encoder step still gets decoded. Only needed at
+     * stop(): mid-session an utterance always closes CLOSE_DEFER_SAMPLES of real audio past the
+     * speech end, which is more than one step.
+     */
+    private flushTail() {
+        if (!this.recognizer || !this.stream) return
+
+        this.stream.acceptWaveform({ sampleRate: SAMPLE_RATE, samples: new Float32Array(STOP_FLUSH_SAMPLES) })
+        while (this.recognizer.isReady(this.stream)) this.recognizer.decode(this.stream)
+    }
+
+    /**
+     * Emit whatever the hypothesis has gained since the last call.
+     *
+     * While the utterance is open the trailing word is held back, because a greedy RNN-T emits
+     * token by token and the last word may be a BPE fragment mid-emission ("Ephes"). It goes to
+     * the interim display instead and is committed by the next call, one encoder step later.
+     * Note that only the LAST word pays that - in driver.ts every word paid a flat 1.2s.
+     */
+    private emitFromHypothesis(final: boolean) {
+        const text = this.readText()
+        if (!text) {
+            if (!final) this.options.onInterim?.("")
+            return
+        }
+
+        this.assertPrefix(text)
+        if (text.length > this.lastText.length) this.lastGrowthAtSample = this.totalSamples
+        this.lastText = text
+
+        // the trailing word is held back unless the utterance is closing, or the decoder has gone
+        // a full encoder step without adding anything - at which point it is as settled as it will
+        // ever be and holding it costs latency for nothing
+        const settled = final || this.totalSamples - this.lastGrowthAtSample >= STATIC_TAIL_SAMPLES
+        const lastBoundary = text.lastIndexOf(" ")
+        const commitTo = settled ? text.length : lastBoundary
+
+        if (commitTo > this.emittedChars) {
+            const candidate = text.slice(this.emittedChars, commitTo).trim()
+            this.emittedChars = commitTo
+            if (candidate) this.emitText(candidate, final)
+            else if (final && this.emittedChars > 0) this.emitBoundary()
+        } else if (final && this.emittedChars > 0) {
+            // the utterance ended without new words, but the display still has to close its line
+            this.emitBoundary()
+        }
+
+        this.options.onInterim?.(final ? "" : text.slice(this.emittedChars).trim())
+    }
+
+    /** Close the open utterance: commit the remainder, then clear the hypothesis. */
+    private closeUtterance() {
+        this.emitFromHypothesis(true)
+
+        this.inUtterance = false
+        this.emittedChars = 0
+        this.lastText = ""
+        this.lastGrowthAtSample = this.totalSamples
+
+        // clears the decoded text but NOT the encoder cache (verified - see the file header), so
+        // the next utterance starts warm and its first word does not wait out the priming window
+        this.recognizer.reset(this.stream)
+    }
+
+    /**
+     * The monotonicity guard. Greedy RNN-T cannot retract, and 120s of continuous preaching never
+     * produced a non-prefix result - but sherpa's homophone replacer and rule_fsts post-processors
+     * would, and neither is enabled here today. If that ever changes this is where it surfaces,
+     * loudly, instead of silently duplicating text in the transcript.
+     */
+    private assertPrefix(text: string) {
+        if (!this.lastText || text.startsWith(this.lastText)) return
+
+        console.warn(`[nemotron] hypothesis was revised, not extended - emission restarts from the new text. was ${JSON.stringify(this.lastText.slice(-40))}, now ${JSON.stringify(text.slice(-40))}`)
+        // treat the revision as a fresh hypothesis: already-emitted words are never retracted, so
+        // the only safe move is to re-anchor and let the next extension carry on from here
+        this.emittedChars = text.length
+    }
+
+    private emitText(text: string, utteranceEnd: boolean) {
+        if (!text) {
+            if (utteranceEnd) this.emitBoundary()
+            return
+        }
+
+        const endMs = this.currentMs()
+        const segment: TranscriberSegment = { text, startMs: this.nextEmitStartMs, endMs }
+        if (utteranceEnd) segment.utteranceEnd = true
+        this.nextEmitStartMs = endMs
+
+        if (this.options.language) segment.language = this.options.language
+        this.options.onSegment(segment)
+    }
+
+    /** An utterance that ends with no new words still ends - the display closes its line on this. */
+    private emitBoundary() {
+        const endMs = this.currentMs()
+        const segment: TranscriberSegment = { text: "", startMs: this.nextEmitStartMs, endMs, utteranceEnd: true }
+        this.nextEmitStartMs = endMs
+        if (this.options.language) segment.language = this.options.language
+        this.options.onSegment(segment)
+    }
+}
+
+/** Int16 LE PCM bytes (as sent over IPC) to the Float32 samples sherpa expects. */
+function int16ToFloat32(buffer: Uint8Array): Float32Array {
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+    const count = Math.floor(buffer.byteLength / 2)
+    const samples = new Float32Array(count)
+    for (let i = 0; i < count; i++) samples[i] = view.getInt16(i * 2, true) / 32768
+    return samples
+}

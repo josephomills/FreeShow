@@ -12,6 +12,7 @@ import os from "os"
 import path from "path"
 import { NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE } from "../../setup/models/nemotronFiles"
 import { NemotronDriver } from "../nemotron/driver"
+import { NemotronStreamDriver } from "../nemotron/streamDriver"
 import type { DriverCallbacks, TranscriptionDriver } from "../types"
 
 export type BenchEngineId = "nemotron"
@@ -80,22 +81,29 @@ export interface EngineVariant {
     /** Stamped into the report so two runs are never compared across different engine builds. */
     id: string
     engine: BenchEngineId
-    /** Reserved for the streaming driver added in phase 2 - "batch" is today's behaviour. */
-    decode: "batch"
+    /** "batch" is the shipped fresh-stream-per-decode path; "stream" keeps one warm stream. */
+    decode: "batch" | "stream"
 }
 
 export function createDriver(variant: EngineVariant, callbacks: DriverCallbacks, language = "en"): TranscriptionDriver {
-    // one variant today; the streaming driver joins here rather than in the runner, so every
-    // metric path stays identical between the two and only the decode strategy differs
-    if (variant.engine !== "nemotron" || variant.decode !== "batch") throw new Error(`Unknown bench variant: ${variant.engine}/${variant.decode}`)
+    // both drivers are constructed here rather than in the runner, so every metric path is
+    // identical between them and the only thing that differs is the decode strategy
+    if (variant.engine !== "nemotron") throw new Error(`Unknown bench engine: ${variant.engine}`)
 
     const paths = findNemotronPaths()
     if (!paths) throw new Error(`Nemotron model not found in ${resolveNemotronModelDir()}`)
 
-    return new NemotronDriver({
+    const options = {
         paths: { encoder: paths.encoder, decoder: paths.decoder, joiner: paths.joiner, tokens: paths.tokens },
         vadModelPath: paths.vad,
         language,
         ...callbacks
-    })
+    }
+    return variant.decode === "stream" ? new NemotronStreamDriver(options) : new NemotronDriver(options)
 }
+
+/** The A/B pair every phase-2 claim is measured against. */
+export const VARIANTS: EngineVariant[] = [
+    { id: "nemotron/batch", engine: "nemotron", decode: "batch" },
+    { id: "nemotron/stream", engine: "nemotron", decode: "stream" }
+]
