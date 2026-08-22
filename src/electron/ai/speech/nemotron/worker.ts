@@ -5,10 +5,11 @@
 // down this process alone - the transcriber proxy surfaces it as an engine error.
 
 import { NemotronDriver } from "./driver"
+import { NemotronStreamDriver } from "./streamDriver"
 import type { NemotronModelPaths } from "./manager"
 import type { TranscriberSegment } from "../types"
 
-export type NemotronWorkerRequest = { type: "start"; paths: NemotronModelPaths; vadModelPath: string; language?: string } | { type: "audio"; data: Uint8Array } | { type: "stop" }
+export type NemotronWorkerRequest = { type: "start"; paths: NemotronModelPaths; vadModelPath: string; language?: string; streamingDecode?: boolean } | { type: "audio"; data: Uint8Array } | { type: "stop" }
 
 export type NemotronWorkerResponse = { type: "ready" } | { type: "segment"; segment: TranscriberSegment } | { type: "interim"; text: string } | { type: "error"; message: string } | { type: "stopped" } | { type: "alive" }
 
@@ -16,7 +17,7 @@ export type NemotronWorkerResponse = { type: "ready" } | { type: "segment"; segm
 const parentPort = (process as NodeJS.Process & { parentPort?: { postMessage(message: unknown): void; on(event: "message", listener: (event: { data: NemotronWorkerRequest }) => void): void } }).parentPort
 
 if (parentPort) {
-    let driver: NemotronDriver | null = null
+    let driver: NemotronDriver | NemotronStreamDriver | null = null
     const post = (message: NemotronWorkerResponse) => parentPort.postMessage(message)
 
     // liveness heartbeat: a decode that never returns (native hang) silences this too - which is
@@ -26,14 +27,15 @@ if (parentPort) {
     const handle = async (message: NemotronWorkerRequest) => {
         try {
             if (message.type === "start") {
-                driver = new NemotronDriver({
+                const options = {
                     paths: message.paths,
                     vadModelPath: message.vadModelPath,
                     language: message.language,
-                    onSegment: (segment) => post({ type: "segment", segment }),
-                    onInterim: (text) => post({ type: "interim", text }),
-                    onError: (errorMessage) => post({ type: "error", message: errorMessage })
-                })
+                    onSegment: (segment: TranscriberSegment) => post({ type: "segment", segment }),
+                    onInterim: (text: string) => post({ type: "interim", text }),
+                    onError: (errorMessage: string) => post({ type: "error", message: errorMessage })
+                }
+                driver = message.streamingDecode ? new NemotronStreamDriver(options) : new NemotronDriver(options)
                 await driver.start()
                 post({ type: "ready" })
             } else if (message.type === "audio") {

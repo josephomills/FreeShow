@@ -24,6 +24,14 @@ export interface SttEngineOptions {
     model?: string
     customModelPath?: string
 
+    /**
+     * Nemotron: drive the recognizer as one persistent cache-aware stream instead of re-decoding
+     * each utterance on a fresh one. Measured ~3.5x cheaper and ~1.2s lower per-word latency
+     * (src/electron/ai/speech/bench/). Off by default for one release - the batch path is what
+     * has run in live services so far.
+     */
+    streamingDecode?: boolean
+
     // WIP interpretationMode
     interpretationMode?: boolean
     listenLanguage?: string
