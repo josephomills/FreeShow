@@ -243,12 +243,22 @@ describe("bench/metrics", () => {
 
 // every manifest that resolves to audio on this machine: the committed public ones, plus any
 // private set the operator generated into the fixture root (real sermons - see makeFixtures.js)
+/**
+ * A whole matrix in one process runs out of memory. Each loaded recognizer holds ~2 GB of native
+ * ONNX state, and dropping the JS reference does not tell node's GC that 2 GB became free, so the
+ * sessions pile up until the vitest worker is killed. AI_BENCH_SET and AI_BENCH_VARIANT let a
+ * caller run one slice per process (scripts/ai/bench.sh does exactly that) - which is also the
+ * only way the resource numbers are attributable to a single model.
+ */
+const setFilter = process.env.AI_BENCH_SET
+const variantFilter = process.env.AI_BENCH_VARIANT
+
 const runnableSets: { set: FixtureSet; fixtures: Fixture[] }[] = listManifests()
     .map((manifestPath) => {
         const set = loadFixtureSet(manifestPath)
         return { set, fixtures: availableFixtures(set) }
     })
-    .filter((entry) => entry.fixtures.length > 0)
+    .filter((entry) => entry.fixtures.length > 0 && (!setFilter || entry.set.id === setFilter))
 
 const canRun = !!process.env.AI_BENCH && benchEngineReady("nemotron") && runnableSets.length > 0
 const describeIfEngine = canRun ? describe : describe.skip
@@ -260,11 +270,12 @@ if (process.env.AI_BENCH && !canRun) {
 describeIfEngine("bench/nemotron (real model)", () => {
     for (const { set, fixtures } of runnableSets) {
         it(`scores ${set.id} (${fixtures.length} fixtures)`, async () => {
+            const variants = availableVariants().filter((variant) => !variantFilter || variant.id === variantFilter)
             const records: RunRecord[] = []
             const stamp = Number(process.env.AI_BENCH_STAMP) || 0
 
             for (const fixture of fixtures) {
-                for (const variant of availableVariants()) {
+                for (const variant of variants) {
                     const result = await runFixture({ fixtureId: fixture.id, fixturePath: fixture.absolutePath, variant, mode: "max" })
                     const metrics = scoreRun(result, fixture.transcript)
                     records.push(toRunRecord(result, metrics, set, stamp))
@@ -278,7 +289,7 @@ describeIfEngine("bench/nemotron (real model)", () => {
             }
 
             console.log(`\n${renderConsoleReport(records)}`)
-            console.log(`\n${renderMarkdownDiff(records, availableVariants()[0].id)}`)
+            console.log(`\n${renderMarkdownDiff(records, variants[0].id)}`)
             console.log(`\nreport -> ${writeReport(records)}`)
         }, 3600000)
     }
