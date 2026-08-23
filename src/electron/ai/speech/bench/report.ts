@@ -291,7 +291,13 @@ export function writeReport(records: RunRecord[], outDir = resolveReportDir()): 
         .toISOString()
         .replace(/\.\d+Z$/, "Z")
         .replace(/:/g, "-")
-    const file = path.join(outDir, `${fileSafe(report.fixtureSets.map((set) => set.id).join("+"))}-${fileSafe(report.modes.join("+"))}-${stamp}.json`)
+    // The variant is part of the name because bench.sh runs one variant per process to bound
+    // memory, and every slice of a matrix shares its set, mode and timestamp - without this they
+    // all write the same path and only the last variant survives. Omitted when a run covers
+    // several variants, so a whole-matrix run keeps its original name.
+    const variants = [...new Set(records.map((record) => record.variantId))]
+    const variantPart = variants.length === 1 ? `-${fileSafe(variants[0])}` : ""
+    const file = path.join(outDir, `${fileSafe(report.fixtureSets.map((set) => set.id).join("+"))}-${fileSafe(report.modes.join("+"))}${variantPart}-${stamp}.json`)
     fs.writeFileSync(file, JSON.stringify(report, withoutAlignmentPairs, 2))
 
     return file

@@ -358,3 +358,34 @@ describe("bench/report aggregation", () => {
         expect(summary.errors).toBe(1)
     })
 })
+
+describe("writeReport file naming", () => {
+    const record = (variantId: string): RunRecord => ({
+        fixtureSetId: "s",
+        fixtureSetHash: "h",
+        fixtureId: "f",
+        variantId,
+        mode: "max",
+        platform: "darwin",
+        arch: "arm64",
+        timestampMs: 1000,
+        metrics: { fixtureId: "f", variantId, audioDurationMs: 1000, interimEchoes: [], decodeCostRatio: 0.1, startupMs: 1, errors: [] }
+    })
+
+    it("keeps single-variant slices in separate files", () => {
+        // bench.sh runs one variant per process to bound memory; every slice of a matrix shares its
+        // set, mode and timestamp, so without the variant in the name only the last one survives
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "freeshow-report-"))
+        const a = writeReport([record("stream en-1120")], dir)
+        const b = writeReport([record("stream multi-320")], dir)
+
+        expect(a).not.toBe(b)
+        expect(fs.readdirSync(dir)).toHaveLength(2)
+    })
+
+    it("leaves a multi-variant run's name alone", () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "freeshow-report-"))
+        const file = writeReport([record("a"), record("b")], dir)
+        expect(path.basename(file)).toBe("s-max-1970-01-01T00-00-01Z.json")
+    })
+})
