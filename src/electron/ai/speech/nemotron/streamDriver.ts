@@ -81,8 +81,22 @@ const STATIC_TAIL_SAMPLES = Math.ceil(((NEMOTRON_CHUNK_SHIFT_MS + 200) / 1000) *
 interface StreamNemotronOptions extends DriverCallbacks {
     paths: NemotronModelPaths
     vadModelPath: string
-    /** Reported on every segment - the English model is monolingual, kept for the segment shape. */
+    /** Reported on every segment. The shipped English export is monolingual. */
     language?: string
+    /**
+     * Passed to the recognizer as modelConfig.language for a MULTILINGUAL export (Nemotron 3.5
+     * covers ~40 languages in one model). Undocumented in sherpa-onnx-node's JSDoc but read by the
+     * addon; an unknown value falls back to "auto" with a warning from the native side. Ignored
+     * entirely by the English-only export, which has no language embedding.
+     */
+    modelLanguage?: string
+    /**
+     * Merged into the OnlineRecognizer config, last. Exists so the benchmark harness can try
+     * alternative model sets and decoding methods (hotwords need modified_beam_search plus a
+     * bpe.model, neither of which the shipped Nemotron export supports) without forking this file.
+     * Not set by the app.
+     */
+    recognizerOverrides?: Record<string, unknown>
     /** Injected by tests. Production loads the native addon lazily in start(). */
     sherpa?: any
 }
@@ -123,6 +137,7 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         const sherpa = this.options.sherpa || require("sherpa-onnx-node")
         const { paths, vadModelPath } = this.options
 
+        const { recognizerOverrides } = this.options
         this.recognizer = new sherpa.OnlineRecognizer({
             // the encoder metadata declares feat_dim=128 and sherpa reads it from there, so this
             // value is advisory - but a wrong one here is a landmine for any future re-export
@@ -132,7 +147,9 @@ export class NemotronStreamDriver implements TranscriptionDriver {
                 tokens: paths.tokens,
                 numThreads: 2,
                 provider: "cpu",
-                debug: 0
+                debug: 0,
+                ...(this.options.modelLanguage ? { language: this.options.modelLanguage } : {}),
+                ...((recognizerOverrides?.modelConfig as Record<string, unknown>) || {})
             },
             // greedy is the only method this model supports, which also rules out hotword biasing
             // (both live behind modified_beam_search) - see the file header
@@ -141,7 +158,8 @@ export class NemotronStreamDriver implements TranscriptionDriver {
             // from the decoder - it is not the energy gate driver.ts's header describes - but it
             // can only be evaluated at encoder-step boundaries, so its resolution is one 1120ms
             // chunk. Silero's 512-sample window is 32ms, and it also gates music and crowd noise.
-            enableEndpoint: false
+            enableEndpoint: false,
+            ...Object.fromEntries(Object.entries(recognizerOverrides || {}).filter(([key]) => key !== "modelConfig"))
         })
 
         this.stream = this.recognizer.createStream()

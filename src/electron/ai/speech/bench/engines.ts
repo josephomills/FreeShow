@@ -33,6 +33,46 @@ export function resolveNemotronModelDir(): string {
     return process.env.FREESHOW_AI_MODEL_DIR || path.join(resolveUserDataDir(), "bin", "nemotron", "models")
 }
 
+/** Alternative model sets, downloaded by scripts/ai/getBenchModels.js. Never shipped. */
+export function resolveBenchModelDir(setId: string): string {
+    return path.join(resolveUserDataDir(), "bin", "bench", "models", setId)
+}
+
+/** The VAD is shared by every set - only the app downloads it, and it is model-independent. */
+function resolveVadPath(): string | null {
+    const file = path.join(resolveNemotronModelDir(), NEMOTRON_VAD_FILE)
+    return isUsable(file) ? file : null
+}
+
+function isUsable(file: string): boolean {
+    try {
+        return fs.existsSync(file) && fs.statSync(file).size > 1024
+    } catch {
+        return false
+    }
+}
+
+/** Model files for a bench set, or null when it has not been downloaded. */
+export function findBenchModelPaths(setId: string): NemotronPaths | null {
+    const dir = resolveBenchModelDir(setId)
+    const vad = resolveVadPath()
+    if (!vad) return null
+
+    const paths: NemotronPaths = {
+        encoder: path.join(dir, "encoder.int8.onnx"),
+        decoder: path.join(dir, "decoder.int8.onnx"),
+        joiner: path.join(dir, "joiner.int8.onnx"),
+        tokens: path.join(dir, "tokens.txt"),
+        vad
+    }
+    return Object.values(paths).every(isUsable) ? paths : null
+}
+
+export function benchModelReady(setId?: string): boolean {
+    if (!setId) return !!findNemotronPaths()
+    return !!findBenchModelPaths(setId)
+}
+
 export interface NemotronPaths {
     encoder: string
     decoder: string
@@ -83,6 +123,12 @@ export interface EngineVariant {
     engine: BenchEngineId
     /** "batch" is the shipped fresh-stream-per-decode path; "stream" keeps one warm stream. */
     decode: "batch" | "stream"
+    /** A set id from modelSets.ts. Omitted means the model the app itself downloaded. */
+    modelSet?: string
+    /** modelConfig.language for a multilingual export. */
+    modelLanguage?: string
+    /** Merged into the recognizer config - decodingMethod, hotwordsFile, bpeVocab, ... */
+    recognizerOverrides?: Record<string, unknown>
 }
 
 export function createDriver(variant: EngineVariant, callbacks: DriverCallbacks, language = "en"): TranscriptionDriver {
@@ -90,20 +136,42 @@ export function createDriver(variant: EngineVariant, callbacks: DriverCallbacks,
     // identical between them and the only thing that differs is the decode strategy
     if (variant.engine !== "nemotron") throw new Error(`Unknown bench engine: ${variant.engine}`)
 
-    const paths = findNemotronPaths()
-    if (!paths) throw new Error(`Nemotron model not found in ${resolveNemotronModelDir()}`)
+    const paths = variant.modelSet ? findBenchModelPaths(variant.modelSet) : findNemotronPaths()
+    if (!paths) throw new Error(`model set ${variant.modelSet || "(app)"} not found - run: node scripts/ai/getBenchModels.js ${variant.modelSet || ""}`)
 
     const options = {
         paths: { encoder: paths.encoder, decoder: paths.decoder, joiner: paths.joiner, tokens: paths.tokens },
         vadModelPath: paths.vad,
         language,
+        modelLanguage: variant.modelLanguage,
+        recognizerOverrides: variant.recognizerOverrides,
         ...callbacks
     }
+    // only the streaming driver can carry an alternative model set: the batch driver is the
+    // baseline being compared against, and there is no reason to vary two things at once
     return variant.decode === "stream" ? new NemotronStreamDriver(options) : new NemotronDriver(options)
 }
 
-/** The A/B pair every phase-2 claim is measured against. */
+/**
+ * The comparison matrix. Ordered so each row changes ONE thing from the row above it, which is
+ * what makes the deltas attributable:
+ *
+ *   batch -> stream       how the recognizer is driven   (same model, same tier)
+ *   en-1120 -> en-160     the chunk tier                 (same weights)
+ *   en-1120 -> multi-1120 English-only -> multilingual   (same tier)
+ *   multi-1120 -> multi-320  the tier again, on the multilingual weights
+ *
+ * Rows whose model set is not downloaded are skipped rather than failing.
+ */
 export const VARIANTS: EngineVariant[] = [
-    { id: "nemotron/batch", engine: "nemotron", decode: "batch" },
-    { id: "nemotron/stream", engine: "nemotron", decode: "stream" }
+    { id: "batch en-1120", engine: "nemotron", decode: "batch" },
+    { id: "stream en-1120", engine: "nemotron", decode: "stream" },
+    { id: "stream en-160", engine: "nemotron", decode: "stream", modelSet: "en-160" },
+    { id: "stream multi-1120", engine: "nemotron", decode: "stream", modelSet: "multi-1120", modelLanguage: "en" },
+    { id: "stream multi-320", engine: "nemotron", decode: "stream", modelSet: "multi-320", modelLanguage: "en" }
 ]
+
+/** Variants whose model set is present on this machine. */
+export function availableVariants(variants: EngineVariant[] = VARIANTS): EngineVariant[] {
+    return variants.filter((variant) => benchModelReady(variant.modelSet))
+}

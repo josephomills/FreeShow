@@ -12,7 +12,7 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { describe, expect, it } from "vitest"
-import { benchEngineReady, resolveNemotronModelDir, VARIANTS } from "./engines"
+import { availableVariants, benchEngineReady, resolveNemotronModelDir } from "./engines"
 import { availableFixtures, listManifests, loadFixtureSet, resolveManifestDir, type Fixture, type FixtureSet } from "./fixtures"
 import { align, normalizeForWer, vocabularyErrorRate } from "./align"
 import { scoreRun } from "./metrics"
@@ -264,15 +264,15 @@ describeIfEngine("bench/nemotron (real model)", () => {
             for (const fixture of fixtures) {
                 const seconds = ((fixture.durationMs || 0) / 1000).toFixed(1)
                 console.log(`\n=== ${fixture.id} (${seconds}s ${fixture.tier}) ===`)
-                console.log(`  ${"variant".padEnd(17)}${"decode".padStart(9)}${"push p99".padStart(10)}${"push max".padStart(10)}${"lag mean".padStart(10)}${"lag p50".padStart(9)}${"lag max".padStart(9)}${"words".padStart(7)}${"WER".padStart(8)}${"echo".padStart(6)}`)
+                console.log(`  ${"variant".padEnd(19)}${"decode".padStart(9)}${"push p99".padStart(10)}${"push max".padStart(10)}${"lag mean".padStart(10)}${"lag p50".padStart(9)}${"lag max".padStart(9)}${"words".padStart(7)}${"WER".padStart(8)}${"echo".padStart(6)}`)
 
-                for (const variant of VARIANTS) {
+                for (const variant of availableVariants()) {
                     const result = await runFixture({ fixtureId: fixture.id, fixturePath: fixture.absolutePath, variant, mode: "max" })
                     const metrics = scoreRun(result, fixture.transcript)
                     const lag = metrics.commitLag!
                     const wer = metrics.wer ? `${(metrics.wer.wer * 100).toFixed(1)}%` : "-"
 
-                    console.log(`  ${variant.id.padEnd(17)}${`${metrics.decodeCostRatio.toFixed(3)}x`.padStart(9)}${`${result.pacer.pushBlockedP99}`.padStart(10)}${`${result.pacer.pushBlockedMax}`.padStart(10)}${`${Math.round(lag.lag.mean)}`.padStart(10)}${`${lag.lag.p50}`.padStart(9)}${`${lag.lag.max}`.padStart(9)}${`${lag.words}`.padStart(7)}${wer.padStart(8)}${`${metrics.interimEchoes.length}`.padStart(6)}`)
+                    console.log(`  ${variant.id.padEnd(19)}${`${metrics.decodeCostRatio.toFixed(3)}x`.padStart(9)}${`${result.pacer.pushBlockedP99}`.padStart(10)}${`${result.pacer.pushBlockedMax}`.padStart(10)}${`${Math.round(lag.lag.mean)}`.padStart(10)}${`${lag.lag.p50}`.padStart(9)}${`${lag.lag.max}`.padStart(9)}${`${lag.words}`.padStart(7)}${wer.padStart(8)}${`${metrics.interimEchoes.length}`.padStart(6)}`)
                     if (result.errors.length) console.log(`      errors: ${result.errors.join(" | ")}`)
                     console.log(`      ...${result.hypothesis.slice(-130)}`)
 
