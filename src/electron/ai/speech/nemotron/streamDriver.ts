@@ -57,26 +57,34 @@ const VAD_MIN_SPEECH = 0.15
 // unlike driver.ts this is not a decode-cost boundary and never slices a word out of a batch
 const VAD_MAX_SPEECH = 30
 
-// Real audio that must reach the recognizer after the VAD says speech ended, before the utterance
-// is closed and the stream reset. It has to cover a FULL chunk shift: the last word's audio only
-// influences the transcript once an encoder step consumes it, and a step fires every 1120ms.
-// driver.ts used 500ms here, which is less than one step - under a persistent stream that would
-// close before the final word's own chunk had ever run. Costs nothing to wait: the audio is being
-// decoded either way, there is no batch to assemble.
-const CLOSE_DEFER_SAMPLES = Math.ceil(((NEMOTRON_CHUNK_SHIFT_MS + 100) / 1000) * SAMPLE_RATE)
+/**
+ * Every timing below is derived from the export's chunk shift, so they must move together when the
+ * export does. The shipped model is 1120ms, but the same NVIDIA weights are published at
+ * 80/160/560ms and the multilingual 3.5 model at 80-1120ms; hardcoding 1120 would make a 160ms
+ * export wait seven times too long to commit anything and look far worse than it is.
+ *
+ * The native side reads the true value from the ONNX metadata (chunk_shift) and does not expose
+ * it, so this is passed in rather than discovered - and NEMOTRON_CHUNK_SHIFT_MS stays the default
+ * so production and the pinned export can never drift apart.
+ */
+function gridTimings(chunkShiftMs: number) {
+    return {
+        // Real audio that must reach the recognizer after the VAD says speech ended, before the
+        // utterance is closed and the stream reset. It has to cover a FULL chunk shift: the last
+        // word's audio only influences the transcript once an encoder step consumes it. driver.ts
+        // used a flat 500ms, which is less than one 1120ms step - under a persistent stream that
+        // closes before the final word's own chunk has run. Waiting costs nothing here: the audio
+        // is being decoded either way, there is no batch to assemble.
+        closeDeferSamples: Math.ceil(((chunkShiftMs + 100) / 1000) * SAMPLE_RATE),
 
-// Silence pushed into the stream at stop(), so the last real audio gets an encoder step to land
-// in. Mid-session this is unnecessary - CLOSE_DEFER_SAMPLES already guarantees a step past the
-// speech end - but at stop() the audio simply ends, and whatever fell between the last step and
-// the end would otherwise never be decoded at all. The bench caught this as a dropped final word.
-const STOP_FLUSH_SAMPLES = CLOSE_DEFER_SAMPLES
-
-// While an utterance is open the trailing word is held back (it may be a mid-emission BPE
-// fragment). If the hypothesis then stops growing - a pause too short for the VAD to close on -
-// that word would wait indefinitely, which the bench measured as a 9s worst case. A full encoder
-// step with no new tokens means the decoder had its chance and produced nothing, so the word is
-// committed. Bounds tail latency at roughly two chunk shifts instead of leaving it unbounded.
-const STATIC_TAIL_SAMPLES = Math.ceil(((NEMOTRON_CHUNK_SHIFT_MS + 200) / 1000) * SAMPLE_RATE)
+        // While an utterance is open the trailing word is held back (it may be a mid-emission BPE
+        // fragment). If the hypothesis then stops growing - a pause too short for the VAD to close
+        // on - that word would wait indefinitely, which the bench measured at 9s worst case. A full
+        // encoder step with no new tokens means the decoder had its chance and produced nothing, so
+        // the word is committed. Bounds tail latency at about two chunk shifts.
+        staticTailSamples: Math.ceil(((chunkShiftMs + 200) / 1000) * SAMPLE_RATE)
+    }
+}
 
 interface StreamNemotronOptions extends DriverCallbacks {
     paths: NemotronModelPaths
@@ -97,12 +105,18 @@ interface StreamNemotronOptions extends DriverCallbacks {
      * Not set by the app.
      */
     recognizerOverrides?: Record<string, unknown>
+    /**
+     * The export's encoder chunk shift in ms. Defaults to the shipped model's. Only set this when
+     * pointing at a different export - every commit timing scales off it.
+     */
+    chunkShiftMs?: number
     /** Injected by tests. Production loads the native addon lazily in start(). */
     sherpa?: any
 }
 
 export class NemotronStreamDriver implements TranscriptionDriver {
     private options: StreamNemotronOptions
+    private timings: ReturnType<typeof gridTimings>
 
     private recognizer: any = null
     private vad: any = null
@@ -127,6 +141,7 @@ export class NemotronStreamDriver implements TranscriptionDriver {
 
     constructor(options: StreamNemotronOptions) {
         this.options = options
+        this.timings = gridTimings(options.chunkShiftMs ?? NEMOTRON_CHUNK_SHIFT_MS)
     }
 
     async start(): Promise<void> {
@@ -233,7 +248,7 @@ export class NemotronStreamDriver implements TranscriptionDriver {
                 closed = true
             }
             if (closed && this.inUtterance && !this.finalizeAtSample) {
-                this.finalizeAtSample = this.totalSamples + CLOSE_DEFER_SAMPLES
+                this.finalizeAtSample = this.totalSamples + this.timings.closeDeferSamples
             }
 
             if (this.finalizeAtSample && this.totalSamples >= this.finalizeAtSample) {
@@ -259,13 +274,13 @@ export class NemotronStreamDriver implements TranscriptionDriver {
 
     /**
      * Push silence so the audio after the last encoder step still gets decoded. Only needed at
-     * stop(): mid-session an utterance always closes CLOSE_DEFER_SAMPLES of real audio past the
-     * speech end, which is more than one step.
+     * stop(): mid-session an utterance always closes a full chunk shift of real audio past the
+     * speech end, but at stop() the audio simply ends and the remainder would never be decoded.
      */
     private flushTail() {
         if (!this.recognizer || !this.stream) return
 
-        this.stream.acceptWaveform({ sampleRate: SAMPLE_RATE, samples: new Float32Array(STOP_FLUSH_SAMPLES) })
+        this.stream.acceptWaveform({ sampleRate: SAMPLE_RATE, samples: new Float32Array(this.timings.closeDeferSamples) })
         while (this.recognizer.isReady(this.stream)) this.recognizer.decode(this.stream)
     }
 
@@ -291,7 +306,7 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         // the trailing word is held back unless the utterance is closing, or the decoder has gone
         // a full encoder step without adding anything - at which point it is as settled as it will
         // ever be and holding it costs latency for nothing
-        const settled = final || this.totalSamples - this.lastGrowthAtSample >= STATIC_TAIL_SAMPLES
+        const settled = final || this.totalSamples - this.lastGrowthAtSample >= this.timings.staticTailSamples
         const lastBoundary = text.lastIndexOf(" ")
         const commitTo = settled ? text.length : lastBoundary
 

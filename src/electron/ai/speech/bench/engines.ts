@@ -13,6 +13,7 @@ import path from "path"
 import { NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE } from "../../setup/models/nemotronFiles"
 import { NemotronDriver } from "../nemotron/driver"
 import { NemotronStreamDriver } from "../nemotron/streamDriver"
+import { findModelSet } from "./modelSets"
 import type { DriverCallbacks, TranscriptionDriver } from "../types"
 
 export type BenchEngineId = "nemotron"
@@ -144,6 +145,9 @@ export function createDriver(variant: EngineVariant, callbacks: DriverCallbacks,
         vadModelPath: paths.vad,
         language,
         modelLanguage: variant.modelLanguage,
+        // every commit timing scales off the export's grid, so a 160ms set benched with the
+        // shipped 1120ms constants would look far slower than it is
+        chunkShiftMs: variant.modelSet ? findModelSet(variant.modelSet)?.chunkMs : undefined,
         recognizerOverrides: variant.recognizerOverrides,
         ...callbacks
     }
