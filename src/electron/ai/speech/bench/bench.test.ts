@@ -17,6 +17,7 @@ import { availableFixtures, listManifests, loadFixtureSet, resolveManifestDir, t
 import { align, normalizeForWer, vocabularyErrorRate } from "./align"
 import { scoreRun } from "./metrics"
 import { AudioClock, CHUNK_MS, CHUNK_SAMPLES, chunkToBytes, pace } from "./pacer"
+import { renderConsoleReport, renderMarkdownDiff, toRunRecord, writeReport, type RunRecord } from "./report"
 import { runFixture } from "./runner"
 import { BENCH_SAMPLE_RATE, downmixToMono, floatToInt16, readWav16kMono, resampleLinear } from "./wav"
 
@@ -259,22 +260,14 @@ if (process.env.AI_BENCH && !canRun) {
 describeIfEngine("bench/nemotron (real model)", () => {
     for (const { set, fixtures } of runnableSets) {
         it(`scores ${set.id} (${fixtures.length} fixtures)`, async () => {
-            console.log(`\n##### ${set.id} [${set.hash}] #####`)
+            const records: RunRecord[] = []
+            const stamp = Number(process.env.AI_BENCH_STAMP) || 0
 
             for (const fixture of fixtures) {
-                const seconds = ((fixture.durationMs || 0) / 1000).toFixed(1)
-                console.log(`\n=== ${fixture.id} (${seconds}s ${fixture.tier}) ===`)
-                console.log(`  ${"variant".padEnd(19)}${"decode".padStart(9)}${"push p99".padStart(10)}${"push max".padStart(10)}${"lag mean".padStart(10)}${"lag p50".padStart(9)}${"lag max".padStart(9)}${"words".padStart(7)}${"WER".padStart(8)}${"echo".padStart(6)}`)
-
                 for (const variant of availableVariants()) {
                     const result = await runFixture({ fixtureId: fixture.id, fixturePath: fixture.absolutePath, variant, mode: "max" })
                     const metrics = scoreRun(result, fixture.transcript)
-                    const lag = metrics.commitLag!
-                    const wer = metrics.wer ? `${(metrics.wer.wer * 100).toFixed(1)}%` : "-"
-
-                    console.log(`  ${variant.id.padEnd(19)}${`${metrics.decodeCostRatio.toFixed(3)}x`.padStart(9)}${`${result.pacer.pushBlockedP99}`.padStart(10)}${`${result.pacer.pushBlockedMax}`.padStart(10)}${`${Math.round(lag.lag.mean)}`.padStart(10)}${`${lag.lag.p50}`.padStart(9)}${`${lag.lag.max}`.padStart(9)}${`${lag.words}`.padStart(7)}${wer.padStart(8)}${`${metrics.interimEchoes.length}`.padStart(6)}`)
-                    if (result.errors.length) console.log(`      errors: ${result.errors.join(" | ")}`)
-                    console.log(`      ...${result.hypothesis.slice(-130)}`)
+                    records.push(toRunRecord(result, metrics, set, stamp))
 
                     // the invariant every latency number rests on
                     const audioTimes = result.events.map((event) => event.audioMs)
@@ -283,6 +276,10 @@ describeIfEngine("bench/nemotron (real model)", () => {
                     expect(result.hypothesis.length).toBeGreaterThan(0)
                 }
             }
-        }, 600000)
+
+            console.log(`\n${renderConsoleReport(records)}`)
+            console.log(`\n${renderMarkdownDiff(records, availableVariants()[0].id)}`)
+            console.log(`\nreport -> ${writeReport(records)}`)
+        }, 3600000)
     }
 })
