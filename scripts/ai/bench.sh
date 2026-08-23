@@ -23,6 +23,9 @@ if [ -z "$SETS" ]; then
 fi
 
 fail=0
+LOG=$(mktemp)
+trap 'rm -f "$LOG"' EXIT
+
 for set_file in $SETS; do
     # manifest file name is not the set id; read the id out of the manifest
     for id in $(node -e '
@@ -34,10 +37,15 @@ for set_file in $SETS; do
         IFS='|' read -ra V <<< "$VARIANTS"
         for variant in "${V[@]}"; do
             echo "### $id / $variant"
+            # No `head` here. It exits early, SIGPIPEs the grep, and the shell moves on to the next
+            # slice while this vitest is still decoding - so slices overlap and compete for CPU.
+            # That inflated the decode column sevenfold in the first matrix run (batch read 1.469x
+            # against 0.21x measured in isolation) and is why the timings must be serialized.
             AI_BENCH=1 AI_BENCH_STAMP=$STAMP AI_BENCH_SET="$id" AI_BENCH_VARIANT="$variant" \
-                npx vitest run --config config/testing/vitest.config.ts src/electron/ai/speech/bench/bench.test.ts 2>&1 \
-                | grep -E "^  [a-z]|WER|lag|decode|Error|FAIL" | head -20
-            [ ${PIPESTATUS[0]} -ne 0 ] && fail=$((fail+1))
+                npx vitest run --config config/testing/vitest.config.ts src/electron/ai/speech/bench/bench.test.ts > "$LOG" 2>&1
+            status=$?
+            grep -E "^  [a-z-]|Error|FAIL" "$LOG" | head -12
+            [ $status -ne 0 ] && fail=$((fail+1))
         done
     done
 done

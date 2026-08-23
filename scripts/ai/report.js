@@ -25,6 +25,9 @@ function parseArgs(argv) {
     return args
 }
 
+/** Below this a 120s excerpt is worship, applause or silence rather than preaching. */
+const MIN_WPM = 60
+
 const mean = (values) => (values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : NaN)
 
 /** Deterministic bootstrap CI - the same inputs must render the same interval every time. */
@@ -94,13 +97,26 @@ function main() {
     console.log(`\npooled over ${covered.length} fixture(s) x ${variants.length} variant(s), ${records[0].platform}/${records[0].arch}, mode=${records[0].mode}`)
     if (dropped.length) console.log(`dropped ${dropped.length} fixture(s) not run by every variant: ${dropped.slice(0, 4).join(", ")}${dropped.length > 4 ? " ..." : ""}`)
 
-    const withRef = covered.filter((key) => records.some((r) => `${r.fixtureSetId}/${r.fixtureId}` === key && r.metrics.wer))
-    console.log(`WER pooled over ${withRef.length} fixture(s) that have a reference transcript\n`)
+    // Speech-density gate. makeFixtures.js cuts at a fixed offset, which sometimes lands on
+    // worship rather than preaching - one 120s excerpt's reference is "Oh, oh, oh" forty-four
+    // times. Scoring WER on that measures nothing about transcription and drags the pooled number
+    // around, so it is excluded and named rather than silently averaged in. Preaching runs
+    // 120-180 wpm; the threshold is well below anything that is actually speech.
+    const wpm = (record) => (record.metrics.wer ? record.metrics.wer.refLength / (record.metrics.audioDurationMs / 60000) : NaN)
+    const sparse = covered.filter((key) => {
+        const any = records.find((r) => `${r.fixtureSetId}/${r.fixtureId}` === key && r.metrics.wer)
+        return any && wpm(any) < MIN_WPM
+    })
+    const scored = covered.filter((key) => !sparse.includes(key) && records.some((r) => `${r.fixtureSetId}/${r.fixtureId}` === key && r.metrics.wer))
+
+    console.log(`WER pooled over ${scored.length} fixture(s) with a reference transcript`)
+    if (sparse.length) console.log(`excluded from WER, under ${MIN_WPM} words/min so probably not speech: ${sparse.join(", ")}`)
+    console.log()
 
     const rows = variants.map((variant) => {
         const mine = records.filter((r) => r.variantId === variant && covered.includes(`${r.fixtureSetId}/${r.fixtureId}`))
         const decode = mine.map((r) => r.metrics.decodeCostRatio)
-        const wer = mine.filter((r) => r.metrics.wer).map((r) => r.metrics.wer.wer)
+        const wer = mine.filter((r) => r.metrics.wer && scored.includes(`${r.fixtureSetId}/${r.fixtureId}`)).map((r) => r.metrics.wer.wer)
         const lagMean = mine.map((r) => r.metrics.commitLag.lag.mean)
         const lagMax = mine.map((r) => r.metrics.commitLag.lag.max)
         const echo = mine.map((r) => r.metrics.interimEchoes.length)

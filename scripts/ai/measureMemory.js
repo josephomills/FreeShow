@@ -19,12 +19,7 @@ const path = require("path")
 
 function benchModelRoot() {
     const home = os.homedir()
-    const base =
-        process.platform === "darwin"
-            ? path.join(home, "Library", "Application Support", "FreeShow")
-            : process.platform === "win32"
-              ? path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "FreeShow")
-              : path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "FreeShow")
+    const base = process.platform === "darwin" ? path.join(home, "Library", "Application Support", "FreeShow") : process.platform === "win32" ? path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "FreeShow") : path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "FreeShow")
     return { bench: path.join(base, "bin", "bench", "models"), app: path.join(base, "bin", "nemotron", "models") }
 }
 
@@ -66,7 +61,9 @@ function measure(label, dir) {
     } catch (err) {
         const stderr = String(err.stderr || "")
         const peak = stderr.match(/(\d+)\s+maximum resident set size/)
-        const stdout = String(err.stdout || "").trim().split("\n")[0]
+        const stdout = String(err.stdout || "")
+            .trim()
+            .split("\n")[0]
         return { label, json: stdout ? JSON.parse(stdout) : null, peakMb: peak ? Number(peak[1]) / 1e6 : null }
     } finally {
         fs.unlinkSync(script)
