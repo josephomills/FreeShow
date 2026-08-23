@@ -31,6 +31,17 @@ const SETS = {
 
 const FILES = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"]
 
+// Nemotron exports use the plain names above. The Zipformer repos encode the training epoch and
+// the streaming context in the file name, and carry several context variants, so they are matched
+// by pattern and renamed on the way in - every consumer then sees the same four names.
+const PATTERNS = {
+    "zipformer-en": {
+        "encoder.int8.onnx": /^encoder-.*chunk-16-left-128\.int8\.onnx$/,
+        "decoder.int8.onnx": /^decoder-.*chunk-16-left-128\.int8\.onnx$/,
+        "joiner.int8.onnx": /^joiner-.*chunk-16-left-128\.int8\.onnx$/
+    }
+}
+
 function benchModelRoot() {
     const home = os.homedir()
     const base = process.platform === "darwin" ? path.join(home, "Library", "Application Support", "FreeShow") : process.platform === "win32" ? path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "FreeShow") : path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "FreeShow")
@@ -78,24 +89,33 @@ async function fetchSet(id) {
     const info = await api(`https://huggingface.co/api/models/${repo}`)
     const revision = info.sha
     const available = new Set(info.siblings.map((s) => s.rfilename))
-    const wanted = [...FILES, ...(available.has("bpe.model") ? ["bpe.model"] : [])].filter((f) => available.has(f))
+    // { localName -> remoteName }; a pattern set resolves the remote name at download time
+    const patterns = PATTERNS[id] || {}
+    const wanted = {}
+    for (const name of [...FILES, "bpe.model"]) {
+        if (available.has(name)) wanted[name] = name
+        else if (patterns[name]) {
+            const match = [...available].find((f) => patterns[name].test(f))
+            if (match) wanted[name] = match
+        }
+    }
 
-    if (!wanted.length) throw new Error(`${repo} has none of the expected files (has: ${[...available].slice(0, 8).join(", ")})`)
+    if (!Object.keys(wanted).length) throw new Error(`${repo} has none of the expected files (has: ${[...available].slice(0, 8).join(", ")})`)
 
     const dir = path.join(benchModelRoot(), id)
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, "SOURCE.json"), JSON.stringify({ id, repo, revision, files: wanted }, null, 4))
 
     console.log(`\n${id}  <-  ${repo}@${revision.slice(0, 8)}`)
-    for (const file of wanted) {
-        const target = path.join(dir, file)
+    for (const [local, remote] of Object.entries(wanted)) {
+        const target = path.join(dir, local)
         if (fs.existsSync(target) && fs.statSync(target).size > 1024) {
-            console.log(`  ${file} (cached)`)
+            console.log(`  ${local} (cached)`)
             continue
         }
-        console.log(`  ${file}`)
-        await download(`https://huggingface.co/${repo}/resolve/${revision}/${file}`, target)
-        console.log(`  ${file} ${(fs.statSync(target).size / 1e6).toFixed(0)} MB`)
+        console.log(`  ${local}${local === remote ? "" : ` <- ${remote}`}`)
+        await download(`https://huggingface.co/${repo}/resolve/${revision}/${remote}`, target)
+        console.log(`  ${local} ${(fs.statSync(target).size / 1e6).toFixed(0)} MB`)
     }
     return dir
 }

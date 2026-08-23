@@ -62,6 +62,24 @@ export const BENCH_MODEL_SETS: BenchModelSet[] = [
     }
 ]
 
+/**
+ * Parked, not dismissed. The Zipformer is the ONLY cross-platform route to contextual biasing -
+ * hotwords need modified_beam_search plus a BPE vocabulary, and no Nemotron export supports either
+ * (k2-fsa/sherpa-onnx#3572). Its other numbers are striking: 72 MB against Nemotron's 660 MB, and
+ * it decodes at RTF 0.024 against the streaming Nemotron's 0.06.
+ *
+ * Two things stopped it here. It transcribes garbage under every file pairing tried so far - int8
+ * and fp32 encoder, int8 and fp32 decoder - producing plausible but wrong English ("UNCLE YELLOW"
+ * for "AFTER EARLY NIGHTFALL THE YELLOW LAMPS"), on LibriSpeech as well as on sermon audio, so it
+ * is a configuration fault rather than a domain mismatch. And the repo ships bpe.model but not
+ * bpe.vocab, which is what sherpa's hotword path actually wants ("Each line in vocab should contain
+ * two items ... the first one is bpe token, the second one is score") - exporting it needs
+ * sentencepiece.
+ *
+ * Worth returning to once the tier and multilingual questions are settled.
+ */
+export const ZIPFORMER_PARKED = true
+
 export function findModelSet(id: string): BenchModelSet | undefined {
     return BENCH_MODEL_SETS.find((set) => set.id === id)
 }
