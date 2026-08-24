@@ -10,14 +10,14 @@
 // reference appear here" - a fast approximate transcript answers that, and the accurate
 // transcription and hand-marking are worth doing only for the clips that survive.
 //
-//   node scripts/ai/mineReferences.js --count 60 --start 90 --duration 120
+//   node scripts/ai/mineReferences.js --from "~/Music/Some Series" --count 60 --start 90 --duration 120
 
 const { execFileSync } = require("child_process")
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
 
-const LIBRARY = path.join(os.homedir(), "Music", "The Poimano (Topical)")
+const DEFAULT_LIBRARY = path.join(os.homedir(), "Music", "The Poimano (Topical)")
 const AUDIO = [".mp3", ".m4a", ".wav"]
 
 // screening only - a book name followed by a number within a few words
@@ -26,7 +26,7 @@ const NUM = "\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve
 const REFERENCE = new RegExp(`\\b(${BOOKS})\\b[\\s,]*(chapter\\s+)?(${NUM})\\b`, "gi")
 
 function parseArgs(argv) {
-    const args = { count: 60, start: 90, duration: 120, model: "small.en" }
+    const args = { count: 60, start: 90, duration: 120, model: "small.en", from: DEFAULT_LIBRARY }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i].replace(/^--/, "")
         if (key in args) args[key] = isNaN(Number(argv[i + 1])) ? argv[++i] : Number(argv[++i])
@@ -57,7 +57,12 @@ function main() {
     }
 
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "freeshow-mine-"))
-    const all = findAudio(LIBRARY)
+    const library = args.from.startsWith("~") ? path.join(os.homedir(), args.from.slice(1)) : args.from
+    if (!fs.existsSync(library)) {
+        console.error(`not found: ${library}`)
+        process.exit(1)
+    }
+    const all = findAudio(library)
 
     // spread across the library rather than taking a run of consecutive files, which would sample
     // one preacher, one series and one recording setup

@@ -770,6 +770,13 @@ describe("DetectionCoordinator", () => {
             expect(found[0]).toMatchObject({ book: "Hebrews", chapter: 4, verseStart: 12 })
         })
 
+        it("does not project Numbers when a preacher counts aloud", () => {
+            // found on a second preacher's catalogue, whose messages are numbered lists ("Twelve
+            // Reasons Why...", "Ten Rules for..."), so counting aloud is constant. "number. One,
+            // two, three, four, five" was projecting Numbers 1:2.
+            expect(detect("all right number one two three four five").filter((ref) => ref.bookNumber === 4)).toEqual([])
+        })
+
         it("still projects a real reference to Numbers", () => {
             expect(detect("turn with me to numbers chapter twelve")[0]).toMatchObject({ bookNumber: 4, chapter: 12 })
         })

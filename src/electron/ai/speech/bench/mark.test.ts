@@ -23,6 +23,8 @@ import { BENCH_BOOKS } from "./detection"
 import { resolveFixtureRoot } from "./fixtures"
 
 const HITS = process.env.AI_MARK
+// keeps one source's fixtures from overwriting another's - the point of a second set is comparison
+const SET = process.env.AI_MARK_SET || "refs"
 const WHISPER = "/opt/homebrew/bin/whisper-cli"
 /** A spoken reference is at most this many words ("first corinthians chapter thirteen verse four"). */
 const MAX_REFERENCE_WORDS = 9
@@ -153,7 +155,7 @@ describeIfMarking("mark mined clips as detection fixtures", () => {
         expect(fs.existsSync(model)).toBe(true)
 
         const root = resolveFixtureRoot()
-        const outDir = path.join(root, "refs")
+        const outDir = path.join(root, SET)
         fs.mkdirSync(outDir, { recursive: true })
 
         const fixtures: any[] = []
@@ -175,18 +177,18 @@ describeIfMarking("mark mined clips as detection fixtures", () => {
             console.log(`  ${id}: ${expected.length ? expected.map((r) => `${r.phrase} -> ${r.book}.${r.chapter}:${r.verseStart} @${r.phraseEndMs}ms`).join(" | ") : "(none survived marking)"}`)
             if (!expected.length) continue
 
-            fixtures.push({ id, tier: "sermon", file: path.join("refs", `${id}.wav`), durationMs: duration * 1000, transcript, transcriptSource: "whisper.cpp ggml-large-v3", transcriptApproximate: true, timingSource: "generated", expected })
+            fixtures.push({ id, tier: "sermon", file: path.join(SET, `${id}.wav`), durationMs: duration * 1000, transcript, transcriptSource: "whisper.cpp ggml-large-v3", transcriptApproximate: true, timingSource: "generated", expected })
         }
 
         const manifest = {
-            id: "refs-local",
+            id: `${SET}-local`,
             description: `Sermon excerpts that contain a spoken scripture reference, ${duration}s from ${start}s in. Reference timings come from whisper large-v3 word timestamps; transcripts are a PSEUDO-reference, valid for ranking engines against each other and circular for scoring whisper. Audio and this manifest are private and never committed.`,
             fixtures
         }
-        fs.writeFileSync(path.join(root, "refs.json"), JSON.stringify(manifest, null, 4))
+        fs.writeFileSync(path.join(root, `${SET}.json`), JSON.stringify(manifest, null, 4))
 
         const total = fixtures.reduce((sum, f) => sum + f.expected.length, 0)
-        console.log(`\n  ${fixtures.length} fixtures, ${total} expected reference(s) -> ${path.join(root, "refs.json")}`)
+        console.log(`\n  ${fixtures.length} fixtures, ${total} expected reference(s) -> ${path.join(root, `${SET}.json`)}`)
         expect(fixtures.length).toBeGreaterThan(0)
     }, 3_600_000)
 })

@@ -20,8 +20,14 @@ import { bootstrapCi, describe as describeDistribution, mean } from "./stats"
 
 const VARIANT_ID = process.env.AI_BENCH_VARIANT || "stream multi-1120"
 
+// AI_BENCH_SET narrows to one source, which is how a second preacher's catalogue tells us how much
+// of this generalises rather than being tuned to one voice and one room
+const setFilter = process.env.AI_BENCH_SET
+
 const withReferences: Fixture[] = listManifests()
-    .flatMap((manifest) => availableFixtures(loadFixtureSet(manifest)))
+    .map((manifest) => loadFixtureSet(manifest))
+    .filter((set) => !setFilter || set.id === setFilter)
+    .flatMap((set) => availableFixtures(set))
     .filter((fixture) => fixture.expected.length > 0)
 
 const variant = availableVariants().find((entry) => entry.id === VARIANT_ID)

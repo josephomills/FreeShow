@@ -219,12 +219,14 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         // an ordinary-English alias ("look", "dude") only counts inside a full reference
         if (book.requireVerse && !hasVerse && !unglued) return
 
-        // "verse number twelve" is a way of saying "verse 12", not a reference to the book of
-        // Numbers - but "number" IS that book's name, so the general scan reads it as one. Found in
-        // real sermon audio, where it projected Numbers 12; preachers use the phrasing constantly.
-        // The bare-verse path in the coordinator already resolves these against the open passage.
-        const bookAt = normalized.indexOf(bookToken, match.index)
-        if (/\bnumbers?$/.test(bookToken) && bookAt > 0 && /\bverses?\s+(the\s+)?$/.test(normalized.slice(0, bookAt))) return
+        // Numbers is an ordinary English word before it is a book, and the commonest way a
+        // preacher enumerates - so it only counts inside a CUED reference, the same treatment
+        // book.requireVerse gives aliases like "look" and "dude". Both failing forms came from real
+        // sermon audio: "verse number twelve" meaning verse 12 of the open passage, and "number
+        // one, two, three" meaning nothing at all, from a preacher whose messages are numbered
+        // lists and who therefore counts aloud constantly. A bare "Numbers 12" is given up with
+        // it; "number 12" is said far more often than the book is named without a cue.
+        if (/\bnumbers?$/.test(bookToken) && !/\bchapter\b|\bverses?\b|\d:\d/.test(match[0])) return
 
         // verse bounds (from AlloDel's #3): a verse the chapter does not have is a misheard
         // number, not a reference - drop it rather than project the wrong text. A range that
