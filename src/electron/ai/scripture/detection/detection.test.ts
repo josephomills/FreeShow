@@ -742,4 +742,40 @@ describe("DetectionCoordinator", () => {
             coordinator.stop()
         })
     })
+
+    describe('"verse number N" is not the book of Numbers', () => {
+        // Found while marking real sermon audio: "want to look at verse number 12" projected
+        // Numbers 12, because "number" is that book's own name. Preachers use the phrasing
+        // constantly, so this was a false projection waiting to happen in every service.
+        // the shared BOOKS list has no Numbers, and the positive cases need it
+        const WITH_NUMBERS = [...BOOKS, { number: 4, canonNumber: 4, names: ["Numbers"] }]
+
+        const detect = (text: string) => {
+            const onDetection = vi.fn()
+            const coordinator = new DetectionCoordinator({ books: WITH_NUMBERS, llm: null, getApiKey: () => "", onDetection, onStatus: vi.fn() })
+            coordinator.updateContext({ book: "Hebrews", bookNumber: 58, chapter: 4, verseStart: 1, verseEnd: 1 })
+            coordinator.onTranscriptSegment({ text, startMs: 0, endMs: 3000, utteranceEnd: true })
+            coordinator.stop()
+            return onDetection.mock.calls.map((call) => call[0])
+        }
+
+        it("does not project Numbers for a bare 'verse number' mention", () => {
+            expect(detect("i want us to look at verse number twelve please").filter((ref) => ref.bookNumber === 4)).toEqual([])
+        })
+
+        it("resolves it against the open passage instead", () => {
+            // the whole point: the preacher does mean a verse, just not one in Numbers
+            const found = detect("i want us to look at verse number twelve please")
+            expect(found).toHaveLength(1)
+            expect(found[0]).toMatchObject({ book: "Hebrews", chapter: 4, verseStart: 12 })
+        })
+
+        it("still projects a real reference to Numbers", () => {
+            expect(detect("turn with me to numbers chapter twelve")[0]).toMatchObject({ bookNumber: 4, chapter: 12 })
+        })
+
+        it("still projects Numbers with a verse", () => {
+            expect(detect("numbers chapter twelve verse three")[0]).toMatchObject({ bookNumber: 4, chapter: 12, verseStart: 3 })
+        })
+    })
 })

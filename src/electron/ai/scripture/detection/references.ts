@@ -219,6 +219,13 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         // an ordinary-English alias ("look", "dude") only counts inside a full reference
         if (book.requireVerse && !hasVerse && !unglued) return
 
+        // "verse number twelve" is a way of saying "verse 12", not a reference to the book of
+        // Numbers - but "number" IS that book's name, so the general scan reads it as one. Found in
+        // real sermon audio, where it projected Numbers 12; preachers use the phrasing constantly.
+        // The bare-verse path in the coordinator already resolves these against the open passage.
+        const bookAt = normalized.indexOf(bookToken, match.index)
+        if (/\bnumbers?$/.test(bookToken) && bookAt > 0 && /\bverses?\s+(the\s+)?$/.test(normalized.slice(0, bookAt))) return
+
         // verse bounds (from AlloDel's #3): a verse the chapter does not have is a misheard
         // number, not a reference - drop it rather than project the wrong text. A range that
         // overruns is clamped, because its start is real. Non-canon books (chapterCount 0)
