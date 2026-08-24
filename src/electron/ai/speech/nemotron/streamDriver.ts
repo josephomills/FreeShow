@@ -67,6 +67,14 @@ const VAD_MAX_SPEECH = 30
  * it, so this is passed in rather than discovered - and NEMOTRON_CHUNK_SHIFT_MS stays the default
  * so production and the pinned export can never drift apart.
  */
+/**
+ * How much audio may pass before the decoder is reset. Long enough that ordinary utterance
+ * boundaries never reset it - which is the point, since reset() clears the RNN-T predictor's memory
+ * of what it has just been saying and that measurably costs transcription - and short enough that
+ * one hypothesis string cannot grow for a whole sermon.
+ */
+const DEFAULT_RESET_INTERVAL_MS = 300_000
+
 function gridTimings(chunkShiftMs: number) {
     return {
         // Real audio that must reach the recognizer after the VAD says speech ended, before the
@@ -110,6 +118,16 @@ interface StreamNemotronOptions extends DriverCallbacks {
      * pointing at a different export - every commit timing scales off it.
      */
     chunkShiftMs?: number
+    /**
+     * Minimum audio between decoder resets. reset() clears the hypothesis AND the RNN-T predictor
+     * state - the decoder's memory of what it has just been saying - while the encoder cache
+     * survives. Resetting at every utterance boundary was measurably costing transcription: the
+     * same audio that decodes as "one Corinthians chapter three" on an unreset stream came out as
+     * "one Corinthians cha three" with a reset shortly before it.
+     *
+     * Defaults to DEFAULT_RESET_INTERVAL_MS. 0 restores a reset at every utterance boundary.
+     */
+    resetIntervalMs?: number
     /** Injected by tests. Production loads the native addon lazily in start(). */
     sherpa?: any
 }
@@ -138,6 +156,8 @@ export class NemotronStreamDriver implements TranscriptionDriver {
     private nextEmitStartMs = 0
     /** Absolute sample index at which the hypothesis last got longer - drives the static-tail rule. */
     private lastGrowthAtSample = 0
+    /** Absolute sample index of the last decoder reset, for resetIntervalMs. */
+    private lastResetAtSample = 0
 
     constructor(options: StreamNemotronOptions) {
         this.options = options
@@ -328,13 +348,19 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         this.emitFromHypothesis(true)
 
         this.inUtterance = false
-        this.emittedChars = 0
-        this.lastText = ""
         this.lastGrowthAtSample = this.totalSamples
 
         // clears the decoded text but NOT the encoder cache (verified - see the file header), so
-        // the next utterance starts warm and its first word does not wait out the priming window
-        this.recognizer.reset(this.stream)
+        // the next utterance starts warm and its first word does not wait out the priming window.
+        // It DOES clear the RNN-T predictor state, which costs transcription accuracy, so an
+        // interval keeps that context across utterance boundaries - see resetIntervalMs.
+        const interval = this.options.resetIntervalMs ?? DEFAULT_RESET_INTERVAL_MS
+        if (this.totalSamples - this.lastResetAtSample >= (interval / 1000) * SAMPLE_RATE) {
+            this.recognizer.reset(this.stream)
+            this.lastResetAtSample = this.totalSamples
+            this.emittedChars = 0
+            this.lastText = ""
+        }
     }
 
     /**

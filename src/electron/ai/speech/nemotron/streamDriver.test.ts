@@ -106,8 +106,9 @@ interface Harness {
     push: (ms?: number) => void
 }
 
-async function harness(overrides: Partial<FakeControls> = {}): Promise<Harness> {
-    const controls: FakeControls = { detected: true, closedQueue: 0, words: [], ...overrides }
+async function harness(overrides: Partial<FakeControls> & { resetIntervalMs?: number } = {}): Promise<Harness> {
+    const { resetIntervalMs, ...rest } = overrides
+    const controls: FakeControls = { detected: true, closedQueue: 0, words: [], ...rest }
     const { sherpa, streams } = makeSherpa(controls)
 
     const segments: TranscriberSegment[] = []
@@ -118,6 +119,7 @@ async function harness(overrides: Partial<FakeControls> = {}): Promise<Harness> 
         paths: { encoder: "e", decoder: "d", joiner: "j", tokens: "t" },
         vadModelPath: "v",
         language: "en",
+        resetIntervalMs,
         sherpa,
         onSegment: (segment) => segments.push(segment),
         onInterim: (text) => interims.push(text),
@@ -291,5 +293,46 @@ describe("NemotronStreamDriver", () => {
 
         expect(() => h.push(200)).not.toThrow()
         expect(h.errors[0]).toContain("native decode blew up")
+    })
+
+    it("keeps the decoder's context across an utterance boundary", async () => {
+        // reset() clears the RNN-T predictor's memory of what it has just been saying, not only the
+        // hypothesis. Doing that at every boundary measurably cost transcription: the same audio
+        // that decodes as "one Corinthians chapter three" on an unreset stream came out as "one
+        // Corinthians cha three" with a reset shortly before it, and reference survival over 25
+        // spoken references went from 15 to 13.
+        const h = await harness({ words: ["alpha", "bravo", "charlie", "delta"] })
+        const stream = h.streams[0]
+
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 2)
+        h.controls.detected = false
+        h.controls.closedQueue = 1
+        h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
+
+        // the hypothesis survives the boundary rather than being cleared
+        expect(stream.text).not.toBe("")
+    })
+
+    it("still never repeats committed text without a reset to clear it", async () => {
+        const h = await harness({ words: ["alpha", "bravo", "charlie", "delta", "echo"] })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 2)
+        h.controls.detected = false
+        h.controls.closedQueue = 1
+        h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
+        h.controls.detected = true
+        h.push(NEMOTRON_CHUNK_SHIFT_MS * 3)
+
+        const words = textOf(h.segments).split(/\s+/).filter(Boolean)
+        expect(new Set(words).size).toBe(words.length)
+    })
+
+    it("does reset once the interval passes, so one hypothesis cannot grow forever", async () => {
+        const h = await harness({ words: ["alpha", "bravo"], resetIntervalMs: 0 })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS)
+        h.controls.detected = false
+        h.controls.closedQueue = 1
+        h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
+
+        expect(h.streams[0].text).toBe("")
     })
 })
