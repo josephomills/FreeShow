@@ -367,4 +367,28 @@ describe("NemotronStreamDriver", () => {
 
         expect(textOf(h.segments)).toContain("holy is he")
     })
+
+    it("marks a music label so detection never sees it", async () => {
+        // seen live during a worship set: the engine labelled the audio rather than inventing words
+        // for it, and those labels arrived at scripture detection as ordinary speech
+        const h = await harness({ words: ["[MUSIC", "PLAYING]", "welcome"] })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 3)
+        h.controls.detected = false
+        h.controls.closedQueue = 1
+        h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
+
+        const labelled = h.segments.filter((segment) => segment.text.includes("MUSIC"))
+        expect(labelled.length).toBeGreaterThan(0)
+        expect(labelled.every((segment) => segment.music)).toBe(true)
+    })
+
+    it("does not mark ordinary speech as music", async () => {
+        const h = await harness({ words: ["turn", "to", "ephesians"] })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 3)
+        h.controls.detected = false
+        h.controls.closedQueue = 1
+        h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
+
+        expect(h.segments.some((segment) => segment.music)).toBe(false)
+    })
 })

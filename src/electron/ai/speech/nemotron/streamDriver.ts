@@ -41,6 +41,7 @@
 // lower-latency exports of the same NVIDIA weights exist (see setup/models/nemotronFiles.ts).
 
 import { NEMOTRON_CHUNK_SHIFT_MS } from "../../setup/models/nemotronFiles"
+import { isMusicAnnotation } from "../annotations"
 import { findRepeatedTail } from "../repetition"
 import type { DriverCallbacks, TranscriberSegment, TranscriptionDriver } from "../types"
 import type { NemotronModelPaths } from "./manager"
@@ -417,6 +418,12 @@ export class NemotronStreamDriver implements TranscriptionDriver {
 
         const endMs = this.currentMs()
         const segment: TranscriberSegment = { text, startMs: this.nextEmitStartMs, endMs }
+
+        // The model labels audio it judges not to be speech - "[MUSIC PLAYING]", "(upbeat music)" -
+        // rather than inventing words for it. whisper's path has always marked those; this one did
+        // not, so they reached scripture detection as something a preacher had said. Shown in the
+        // transcript, never fed to detection.
+        if (isMusicAnnotation(text)) segment.music = true
         if (utteranceEnd) segment.utteranceEnd = true
         this.nextEmitStartMs = endMs
 
