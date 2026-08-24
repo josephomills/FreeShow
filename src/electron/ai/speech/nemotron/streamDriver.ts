@@ -41,6 +41,7 @@
 // lower-latency exports of the same NVIDIA weights exist (see setup/models/nemotronFiles.ts).
 
 import { NEMOTRON_CHUNK_SHIFT_MS } from "../../setup/models/nemotronFiles"
+import { findRepeatedTail } from "../repetition"
 import type { DriverCallbacks, TranscriberSegment, TranscriptionDriver } from "../types"
 import type { NemotronModelPaths } from "./manager"
 
@@ -68,12 +69,20 @@ const VAD_MAX_SPEECH = 30
  * so production and the pinned export can never drift apart.
  */
 /**
- * How much audio may pass before the decoder is reset. Long enough that ordinary utterance
- * boundaries never reset it - which is the point, since reset() clears the RNN-T predictor's memory
- * of what it has just been saying and that measurably costs transcription - and short enough that
- * one hypothesis string cannot grow for a whole sermon.
+ * How much audio may pass before the decoder is reset, on top of the reset at every utterance
+ * boundary. 0 means the boundary is the only reset, which is the default and is deliberate.
+ *
+ * Carrying the RNN-T predictor's state across utterance boundaries measurably improved
+ * transcription on 120 s fixtures - two more references recovered out of twenty-five - so this
+ * defaulted to keeping it. Live use over a full service showed why that was wrong: the predictor's
+ * own output is its next input, and given a long enough unbroken run it locks into a cycle and
+ * fills the transcript with one phrase. The utterance boundary was bounding that, and the benefit
+ * measured on two-minute clips cannot be seen to compound the way the failure does.
+ *
+ * The lesson is about the measurement, not the parameter: a fixture set of short clips cannot show
+ * a degeneration that needs minutes of continuous decoding to appear.
  */
-const DEFAULT_RESET_INTERVAL_MS = 300_000
+const DEFAULT_RESET_INTERVAL_MS = 0
 
 function gridTimings(chunkShiftMs: number) {
     return {
@@ -330,6 +339,24 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         if (text.length > this.lastText.length) this.lastGrowthAtSample = this.totalSamples
         this.lastText = text
 
+        // A greedy RNN-T can lock into a cycle and emit the same phrase indefinitely, because the
+        // predictor's own output is its next input - seen filling a live transcript with "and he
+        // saith the LORD" over and over. Nothing in the audio pulls it out; only clearing the
+        // decoder state does, so this both keeps the first occurrence and breaks the cycle.
+        const loopAt = findRepeatedTail(text)
+        if (loopAt >= 0) {
+            const keep = text.slice(0, loopAt).trimEnd()
+            if (keep.length > this.emittedChars) {
+                const candidate = keep.slice(this.emittedChars).trim()
+                this.emittedChars = keep.length
+                if (candidate) this.emitText(candidate, false)
+            }
+            console.warn(`[nemotron] decoder was repeating ${JSON.stringify(text.slice(loopAt).slice(0, 60))} - clearing its state to break the cycle`)
+            this.resetDecoder()
+            this.options.onInterim?.("")
+            return
+        }
+
         // the trailing word is held back unless the utterance is closing, or the decoder has gone
         // a full encoder step without adding anything - at which point it is as settled as it will
         // ever be and holding it costs latency for nothing
@@ -350,6 +377,14 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         this.options.onInterim?.(final ? "" : text.slice(this.emittedChars).trim())
     }
 
+    /** Clear the decoder's state and the emission bookkeeping that tracks its text. */
+    private resetDecoder() {
+        this.recognizer.reset(this.stream)
+        this.lastResetAtSample = this.totalSamples
+        this.emittedChars = 0
+        this.lastText = ""
+    }
+
     /** Close the open utterance: commit the remainder, then clear the hypothesis. */
     private closeUtterance() {
         this.emitFromHypothesis(true)
@@ -362,12 +397,7 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         // It DOES clear the RNN-T predictor state, which costs transcription accuracy, so an
         // interval keeps that context across utterance boundaries - see resetIntervalMs.
         const interval = this.options.resetIntervalMs ?? DEFAULT_RESET_INTERVAL_MS
-        if (this.totalSamples - this.lastResetAtSample >= (interval / 1000) * SAMPLE_RATE) {
-            this.recognizer.reset(this.stream)
-            this.lastResetAtSample = this.totalSamples
-            this.emittedChars = 0
-            this.lastText = ""
-        }
+        if (this.totalSamples - this.lastResetAtSample >= (interval / 1000) * SAMPLE_RATE) this.resetDecoder()
     }
 
     /**

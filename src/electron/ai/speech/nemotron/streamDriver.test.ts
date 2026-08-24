@@ -295,22 +295,21 @@ describe("NemotronStreamDriver", () => {
         expect(h.errors[0]).toContain("native decode blew up")
     })
 
-    it("keeps the decoder's context across an utterance boundary", async () => {
-        // reset() clears the RNN-T predictor's memory of what it has just been saying, not only the
-        // hypothesis. Doing that at every boundary measurably cost transcription: the same audio
-        // that decodes as "one Corinthians chapter three" on an unreset stream came out as "one
-        // Corinthians cha three" with a reset shortly before it, and reference survival over 25
-        // spoken references went from 15 to 13.
+    it("clears the decoder at an utterance boundary", async () => {
+        // Carrying the RNN-T predictor's state across boundaries measurably improved transcription
+        // on 120 s fixtures, so this driver did that for a while. Live use over a full service
+        // showed why it was wrong: the predictor's own output is its next input, and given a long
+        // enough unbroken run it locks into a cycle and fills the transcript with one phrase. The
+        // boundary was bounding that. Short fixtures cannot show a failure that needs minutes of
+        // continuous decoding to appear.
         const h = await harness({ words: ["alpha", "bravo", "charlie", "delta"] })
-        const stream = h.streams[0]
 
         h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 2)
         h.controls.detected = false
         h.controls.closedQueue = 1
         h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
 
-        // the hypothesis survives the boundary rather than being cleared
-        expect(stream.text).not.toBe("")
+        expect(h.streams[0].text).toBe("")
     })
 
     it("still never repeats committed text without a reset to clear it", async () => {
@@ -326,13 +325,37 @@ describe("NemotronStreamDriver", () => {
         expect(new Set(words).size).toBe(words.length)
     })
 
-    it("does reset once the interval passes, so one hypothesis cannot grow forever", async () => {
-        const h = await harness({ words: ["alpha", "bravo"], resetIntervalMs: 0 })
+    it("can be asked to hold its state across a boundary, for measurement", async () => {
+        // the switch stays so the bench can price what the boundary reset costs; production does
+        // not set it
+        const h = await harness({ words: ["alpha", "bravo"], resetIntervalMs: 600_000 })
         h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS)
         h.controls.detected = false
         h.controls.closedQueue = 1
         h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
 
+        expect(h.streams[0].text).not.toBe("")
+    })
+
+    it("breaks a decoder loop instead of transcribing it", async () => {
+        // seen live: the transcript filled with "and he saith the LORD" over and over. The
+        // predictor's own output is its next input, so nothing in the audio pulls it out - only
+        // clearing the decoder state does.
+        const h = await harness({ words: ["saith", "the", "lord", "saith", "the", "lord", "saith", "the", "lord"] })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 9)
+
+        // the decoder state is cleared, which is what actually stops it - a loop can only be
+        // recognised once it has repeated, so some of it escapes first. Catching it after three
+        // repeats instead of twenty is the whole gain.
         expect(h.streams[0].text).toBe("")
+        const words = textOf(h.segments).split(/\s+/).filter(Boolean)
+        expect(words.length).toBeLessThan(9)
+    })
+
+    it("keeps the first occurrence of the repeated phrase", async () => {
+        const h = await harness({ words: ["holy", "is", "he", "amen", "amen", "amen"] })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 6)
+
+        expect(textOf(h.segments)).toContain("holy is he")
     })
 })
