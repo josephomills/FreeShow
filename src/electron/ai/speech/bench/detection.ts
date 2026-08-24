@@ -182,7 +182,11 @@ export async function replayDetection(result: RunResult, options: DetectionRepla
             // the engine's own timings drive the rolling transcript window, as they do in production;
             // audioMs stands in for a driver that does not report them
             const endMs = event.endMs ?? event.audioMs
-            coordinator.onTranscriptSegment({ text: event.text, startMs: event.startMs ?? endMs, endMs })
+            // utteranceEnd is load bearing, not decoration: tier 1 holds a reference sitting at the
+            // very end of the transcript because it may still be being spoken, and this marker is
+            // what tells it the speaker stopped. Dropping it made every held reference wait for the
+            // next words instead, which inflated measured detection latency by seconds.
+            coordinator.onTranscriptSegment({ text: event.text, startMs: event.startMs ?? endMs, endMs, utteranceEnd: event.utteranceEnd })
 
             if (settle) await settle()
         }

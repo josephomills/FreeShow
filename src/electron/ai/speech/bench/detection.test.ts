@@ -22,7 +22,7 @@ function runResult(entries: LogEntry[], audioDurationMs = 60000): RunResult {
         variantId: "nemotron-stream",
         mode: "max",
         audioDurationMs,
-        events: entries.map((entry) => ({ kind: "segment", text: "", wallMs: 0, endMs: entry.audioMs, ...entry })),
+        events: entries.map((entry) => ({ kind: "segment", text: "", wallMs: 0, endMs: entry.audioMs, ...entry, utteranceEnd: true })),
         hypothesis: "",
         pacer: { audioPushedMs: audioDurationMs, wallMs: 0, pushBlockedMs: 0, pushBlockedP50: 0, pushBlockedP99: 0, pushBlockedMax: 0, driftMs: 0 },
         startupMs: 0,
@@ -54,9 +54,9 @@ describe("bench/detection replay", () => {
         const replay = await replayDetection(
             runResult([
                 { kind: "interim", text: "turn to john chapter three verse sixteen", audioMs: 2600 },
-                { kind: "segment", text: "romans chapter eight verse twenty eight", audioMs: 3000, music: true },
+                { kind: "segment", text: "romans chapter eight verse twenty eight", audioMs: 3000, music: true, utteranceEnd: true },
                 { kind: "segment", text: "", audioMs: 3400, utteranceEnd: true },
-                { kind: "segment", text: "please turn to john chapter three verse sixteen", audioMs: 4200 }
+                { kind: "segment", text: "please turn to john chapter three verse sixteen", audioMs: 4200, utteranceEnd: true }
             ])
         )
 
@@ -255,8 +255,8 @@ describe("bench/detection end to end", () => {
         const replay = await replayDetection(
             runResult([
                 { kind: "interim", text: "turn with me to ephesians", audioMs: 1200 },
-                { kind: "segment", text: "turn with me to ephesians chapter two", audioMs: 2000 },
-                { kind: "segment", text: "verse eight", audioMs: 3600 }
+                { kind: "segment", text: "turn with me to ephesians chapter two", audioMs: 2000, utteranceEnd: true },
+                { kind: "segment", text: "verse eight", audioMs: 3600, utteranceEnd: true }
             ])
         )
         const score = scoreDetection(replay, [expected({ book: 49, chapter: 2, verseStart: 8, phrase: "ephesians chapter two verse eight", phraseEndMs: 3100 })])
