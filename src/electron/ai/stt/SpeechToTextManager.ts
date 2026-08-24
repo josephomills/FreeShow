@@ -1,10 +1,13 @@
+import { app } from "electron"
 import { existsSync } from "fs"
+import path from "path"
 import type { SttEngineOptions } from "../../../types/ai/AiSettings"
 import { ToMain } from "../../../types/IPC/ToMain"
 import { sendToMain } from "../../IPC/main"
 import { getNemotronModelIntegrity, getNemotronModelPaths, getVadModelPath, isNemotronSupported } from "../speech/nemotron/manager"
 import { isModelReady, resolveWhisper } from "../speech/whisper/manager"
 import type { TranscriberSegment } from "../speech/types"
+import { SessionAudioRecorder } from "./audioRecorder"
 import { NemotronTranscriber } from "./transcribers/NemotronTranscriber"
 import { WhisperTranscriber } from "./transcribers/WhisperTranscriber"
 
@@ -17,10 +20,15 @@ export class SpeechToText {
     static sessionToken = 0
     // features (e.g. scripture detection) subscribe to the transcript stream while their toggle is on
     private static segmentListeners: Set<SegmentListener> = new Set()
+    // opt-in diagnostic: keeps exactly what the engine heard, so a fault reported from a live
+    // service can be reproduced instead of guessed at - see audioRecorder.ts
+    private static recorder = new SessionAudioRecorder()
 
     static async listen(engine: string, options: SttEngineOptions): Promise<{ started: boolean; error?: string }> {
         this.stopInternal(false)
         const token = ++this.sessionToken
+
+        if (options.recordSessionAudio) this.recorder.start(path.join(app.getPath("userData"), "bin", "bench", "sessions"), Date.now())
 
         const created = await this.createEngine(engine, options)
         if ("error" in created) return { started: false, error: created.error }
@@ -59,6 +67,7 @@ export class SpeechToText {
         this.transcriberEngine = null
         if (!active) return
 
+        this.recorder.stop()
         Promise.resolve(active.stop()).catch((err) => console.error("Error stopping STT engine:", err))
         // whatever interim tail was showing is dead now - a crashed/killed worker never gets to
         // clear it itself, so the authoritative clear lives here on every engine stop
@@ -68,6 +77,7 @@ export class SpeechToText {
 
     // audio arriving before START or after STOP is a safe no-op: the engine is null outside a session
     static pushAudio(buffer: Uint8Array) {
+        this.recorder.write(buffer)
         this.transcriberEngine?.pushAudio(buffer)
     }
 

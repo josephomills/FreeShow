@@ -33,6 +33,17 @@ export interface SttEngineOptions {
      */
     streamingDecode?: boolean
 
+    /**
+     * Keep the microphone audio of the session as a WAV under bin/bench/sessions.
+     *
+     * Off unless deliberately turned on. Transcription faults reported from live services have
+     * repeatedly failed to reproduce from recorded sermons - full messages, worship and silence all
+     * decode cleanly on the bench - so the input itself is the missing evidence. A recording turns
+     * "it happens live" into a fixture. It is a recording of a church service, so it stays local
+     * and only exists while someone is chasing a fault.
+     */
+    recordSessionAudio?: boolean
+
     // WIP interpretationMode
     interpretationMode?: boolean
     listenLanguage?: string
