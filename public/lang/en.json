@@ -1829,6 +1829,7 @@
         "nemotron_not_downloaded": "The streaming model is not downloaded yet (about 680 MB)",
         "nemotron_outdated": "The streaming model on this computer is an older version - download it again to get the current one",
         "fallback_whisper_outdated": "The streaming model needs to be downloaded again - listening with Whisper for now",
+        "nemotron_ready": "The streaming model is downloaded and up to date",
         "nemotron_unsupported": "The streaming engine is not available on this platform - use Whisper instead",
         "whisper_not_installed": "Whisper speech recognition is not installed",
         "check_again": "Check again",

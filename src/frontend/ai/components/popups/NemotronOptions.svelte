@@ -72,6 +72,11 @@
         </MaterialButton>
     {/if}
 {:else if !status.ready}
+    <!-- WHY the model is not ready decides what the operator does about it: an outdated one
+         still transcribes (through the silent whisper fallback), so without this line they can
+         run a whole service on the wrong engine without knowing anything changed -->
+    <Tip type={status.outdated ? "warning" : "info"} value={status.outdated ? "ai.nemotron_outdated" : "ai.nemotron_not_downloaded"} />
+
     <div style="display: flex;gap: 5px;">
         <MaterialButton variant="outlined" icon="download" disabled={isModelDownloading} style="flex: 1;" on:click={downloadModel}>
             <T id="cloud.replace" />{getPercent(modelDownload)}
@@ -82,6 +87,8 @@
         {/if}
     </div>
 {:else}
+    <Tip type="info" value="ai.nemotron_ready" />
+
     <MaterialButton variant="outlined" icon="delete" on:click={deleteModel}>
         <T id="actions.delete" />
     </MaterialButton>
