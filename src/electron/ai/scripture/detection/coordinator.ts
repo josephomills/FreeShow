@@ -117,14 +117,14 @@ export class DetectionCoordinator {
         this.anchor = ctx
     }
 
-    onTranscriptSegment(segment: { text: string; startMs: number; endMs: number }): void {
+    onTranscriptSegment(segment: { text: string; startMs: number; endMs: number; utteranceEnd?: boolean }): void {
         if (this.stopped) return
 
         this.segments.push(segment)
         this.totalWords += countWords(segment.text)
         this.trimRollingTranscript()
 
-        this.runTier1()
+        this.runTier1(segment.utteranceEnd === true)
         this.maybeRunTier2()
     }
 
@@ -141,7 +141,12 @@ export class DetectionCoordinator {
 
     // TIER 1
 
-    private runTier1() {
+    /**
+     * `settled` means the transcriber closed the utterance, so the newest words are the last ones
+     * of that utterance and nothing will extend them. Until then a reference sitting at the very
+     * end of the transcript is only PROVISIONALLY complete - see the tailAnchored guard below.
+     */
+    private runTier1(settled: boolean) {
         const newestEnd = this.segments[this.segments.length - 1].endMs
         const windowText = this.segments
             .filter((segment) => segment.endMs >= newestEnd - TIER1_WINDOW_MS)
@@ -149,14 +154,22 @@ export class DetectionCoordinator {
             .join(" ")
 
         matchReferences(windowText, this.bookIndex).forEach((match) => {
+            // A reference at the very end of the transcript may still be being spoken. Emitting it
+            // immediately is why "Matthew 6:33" reached the screen as Matthew 6:1, then 6:30, then
+            // 6:33 - three passages in just over a second, two of them wrong, because "matthew 6"
+            // and "matthew 6 30" are each a valid reference on their own. Holding it costs one
+            // segment of latency (the streaming engine emits several a second) and only until the
+            // speaker says anything else at all, including the pause that closes the utterance.
+            if (match.tailAnchored && !settled) return
+
             this.tryEmit({ book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote }, "regex")
         })
 
-        this.runAnchorTier1(windowText)
+        this.runAnchorTier1(windowText, settled)
     }
 
     // bare "verse N" / "verses N to M" mentions (no book named) resolve against the anchor passage
-    private runAnchorTier1(windowText: string) {
+    private runAnchorTier1(windowText: string, settled: boolean) {
         const anchor = this.anchor
         if (!anchor) return
 
@@ -183,6 +196,9 @@ export class DetectionCoordinator {
             if (!(verseStart >= 1)) continue
             let verseEnd = groups.end !== undefined ? parseInt(groups.end, 10) : verseStart
             if (verseEnd < verseStart) verseEnd = verseStart
+
+            // same growing-number problem as a full reference: "verse 3" becomes "verse 33"
+            if (!settled && !normalized.slice(match.index + match[0].length).trim()) continue
 
             // the anchor is the chapter live on screen, so a bare verse mention is context-certain
             this.tryEmit({ book: anchor.book, bookNumber: anchor.bookNumber, chapter: anchor.chapter, verseStart, verseEnd, confidence: "high", type: "explicit", quote: match[2] }, "regex")

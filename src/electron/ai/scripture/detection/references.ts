@@ -144,6 +144,13 @@ interface ReferenceMatch {
     verseEnd: number
     confidence: "high" | "medium" | "low"
     quote: string
+    /**
+     * Nothing but whitespace follows this match in the text it was found in, so the reference may
+     * still be being spoken - "matthew 6" is a complete reference to Matthew 6:1 right up until
+     * "33" arrives. Computed here rather than by the caller because the offsets belong to the
+     * NORMALIZED text, which only this function has.
+     */
+    tailAnchored: boolean
 }
 
 // named groups shared by every reference regex: book, cA/cB/cC (chapter routes),
@@ -237,7 +244,8 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         // only a bare "bookname 15" ("he acts 15 years old") stays "medium" and waits for confirmation
         const confidence: "high" | "medium" | "low" = hasVerse || unglued || hasCue ? "high" : "medium"
 
-        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote })
+        const matchEnd = match.index + match[0].length
+        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote, tailAnchored: !normalized.slice(matchEnd).trim() })
         if (options.claimSpan) claimedSpans.push({ from: match.index, to: match.index + match[0].length })
     }
 
