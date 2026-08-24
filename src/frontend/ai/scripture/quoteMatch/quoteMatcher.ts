@@ -78,6 +78,12 @@ const refKey = (r: RefKey) => `${r.book}.${r.chapter}.${r.verseStart}-${r.verseE
 // floors are untouched, so a cue can never turn sermon speech into a detection
 const QUOTE_CUE_REGEX = /\b(?:bible|scriptures?|word(?: of god)?|jesus|christ|lord|god|apostle \w+|prophet \w+|paul|peter|john|james|moses|david|isaiah|solomon)\s+(?:says?|said|tells? us|told us|wrote|writes|declares?|reminds? us)\b|\bit is written\b/
 
+// "some versions say...", "another translation renders it..." - the speaker is announcing a
+// TRANSLATION's wording, the most deliberate quote cue there is. Beyond the speed bar it also
+// lifts the emission to high: the evidence floors are still untouched (the match must qualify
+// exactly as before), this only says a qualifying match was announced rather than incidental
+const VERSION_CUE_REGEX = /\b(?:some|other|another|one|a|the|this|that|every|many)\s+(?:versions?|translations?)\s+(?:says?|said|reads?|renders?(?:\s+it)?|puts?\s+it|translates?(?:\s+it)?|calls?\s+it|has|have)\b|\bversions?\s+say\b/
+
 // SPOKEN SEARCH SCOPES
 // the speaker can't recall the wording but names WHERE it lives: "somewhere in the new
 // testament it says...", "paul writes...", "in the parable of the sower...". The named books
@@ -218,6 +224,7 @@ export class QuoteMatcher {
     // the translation of the last emission (seeded with the drawer's - the first index) - ties
     // between translations break toward it, so cards stop hopping versions mid-reading
     private stickyTranslationId: string | null = null
+    private versionCueUntilMs = 0
     // a translation only takes the sticky slot after two decisive wins: with 30+ installed
     // near-identical versions, single decisive wins land all over the family (NASB vs NAS95 vs
     // NKJV differ by a word) and following each one hops the projected version per verse.
@@ -362,6 +369,10 @@ export class QuoteMatcher {
             }
             this.scopeUntilMs = segment.endMs + SCOPE_WINDOW_MS
         } else if (QUOTE_CUE_REGEX.test(spoken)) this.cueUntilMs = segment.endMs + tuning.CUE_WINDOW_MS
+        if (VERSION_CUE_REGEX.test(spoken)) {
+            this.cueUntilMs = Math.max(this.cueUntilMs, segment.endMs + tuning.CUE_WINDOW_MS)
+            this.versionCueUntilMs = segment.endMs + tuning.CUE_WINDOW_MS
+        }
 
         const tokens = tokenizeTranscriptWithSpans(segment.text).slice(0, tuning.SEGMENT_TOKEN_CAP)
         const seg = this.segmentOrdinal++
@@ -825,6 +836,9 @@ export class QuoteMatcher {
     }
 
     private emit(chosen: Candidate, confidence: "high" | "medium", kind: QuoteMatchEmission["kind"], nowMs: number, skipLedger = false, pool: Candidate[] = []): QuoteMatchEmission {
+        // an announced translation reading ("some versions say...") is deliberate, not incidental
+        if (confidence === "medium" && nowMs <= this.versionCueUntilMs) confidence = "high"
+
         const candidate = this.preferGrounded(pool, chosen)
         const ref = this.refOf(candidate)
         const key = refKey(ref)
