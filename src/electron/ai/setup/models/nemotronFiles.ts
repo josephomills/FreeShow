@@ -5,7 +5,16 @@
 // (speech/nemotron/manager.ts) and the benchmark harness (speech/bench/) both need the names but
 // only one of them runs inside electron.
 //
-// int8 export of NVIDIA's streaming Nemotron transducer, converted for sherpa-onnx.
+// int8 export of NVIDIA's Nemotron 3.5 streaming transducer (multilingual), converted for
+// sherpa-onnx. Chosen over the English-only 0.6b on measured evidence over 19 sermon excerpts
+// (src/electron/ai/speech/bench/): identical CPU cost, worst-case word latency 1400ms against
+// 2500ms, the best accuracy of the five variants tried, and the fewest visibly repeated words -
+// while also covering ~40 languages and emitting punctuation and capitalisation of its own.
+//
+// The chunk grid is 1120ms, the same as the export it replaces, so NEMOTRON_CHUNK_SHIFT_MS below
+// and every commit timing derived from it are unchanged. Lower-latency exports of these weights
+// exist at 80/160/320/560ms and measured WORSE: 2-4x the CPU and 6-7 points less accurate, because
+// a shorter chunk gives the encoder less context to work with.
 // Pinned to a specific repo revision (not "main") and to per-file SHA-256 hashes, so exactly
 // these bytes land or nothing does - the hashes are the LFS checksums Hugging Face publishes for
 // this revision.
@@ -14,17 +23,17 @@
  * model left over from an earlier pin is recognised as outdated instead of being loaded silently.
  * Must be changed together with MODEL_BASE_URL and the hashes below.
  */
-export const NEMOTRON_MODEL_REVISION = "f13b0c6a48186fdd9fdd8d203b9527b0b709b09f"
+export const NEMOTRON_MODEL_REVISION = "cba1c96ca5ef0e8393b50584ae153a79145dc492"
 
-export const MODEL_BASE_URL = "https://huggingface.co/csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14/resolve/f13b0c6a48186fdd9fdd8d203b9527b0b709b09f"
+export const MODEL_BASE_URL = "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-1120ms-int8-2026-06-11/resolve/cba1c96ca5ef0e8393b50584ae153a79145dc492"
 
 export const NEMOTRON_MODEL_FILES = {
-    encoder: { file: "encoder.int8.onnx", sha256: "2f6ae81fe4ccd69ef04cdf048ecd49628e2d3148a6195e152a91b4d2497952dc" },
-    decoder: { file: "decoder.int8.onnx", sha256: "1fb1795cb46e7d0e99b2e096eae83f7e324294e895975a1a894b0384cbbe37f6" },
-    joiner: { file: "joiner.int8.onnx", sha256: "a3f41dccc0f67f37e4210051d1c39a29d473c841cfc32fe574135bac890db91d" },
-    tokens: { file: "tokens.txt", sha256: "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff" }
+    encoder: { file: "encoder.int8.onnx", sha256: "2fff2166acaa535bd969fb223c1f0783d71029f143cb298bc54c2afe85abf772" },
+    decoder: { file: "decoder.int8.onnx", sha256: "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0" },
+    joiner: { file: "joiner.int8.onnx", sha256: "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce" },
+    tokens: { file: "tokens.txt", sha256: "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a" }
 }
-export const NEMOTRON_MODEL_BYTES = 661_920_000
+export const NEMOTRON_MODEL_BYTES = 682_200_000
 
 // speech gating, shared by any streaming driver (~630 KB)
 export const VAD_MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"

@@ -35,7 +35,7 @@ if (parentPort) {
                     onInterim: (text: string) => post({ type: "interim", text }),
                     onError: (errorMessage: string) => post({ type: "error", message: errorMessage })
                 }
-                driver = message.streamingDecode ? new NemotronStreamDriver(options) : new NemotronDriver(options)
+                driver = message.streamingDecode === false ? new NemotronDriver(options) : new NemotronStreamDriver(options)
                 await driver.start()
                 post({ type: "ready" })
             } else if (message.type === "audio") {

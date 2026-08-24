@@ -66,7 +66,7 @@ export class NemotronTranscriber {
         }
         // the streaming driver matters MORE here: in-process decodes block the main process, and
         // its worst push is ~80ms against the batch path's ~670ms
-        this.fallback = this.options.streamingDecode ? new NemotronStreamDriver(options) : new NemotronDriver(options)
+        this.fallback = this.options.streamingDecode === false ? new NemotronDriver(options) : new NemotronStreamDriver(options)
         await this.fallback.start()
         return true
     }
@@ -142,7 +142,7 @@ export class NemotronTranscriber {
             if (!this.stopped) this.onError(`Nemotron transcription process exited unexpectedly (code ${code})`)
         })
 
-        this.post(child, { type: "start", paths: this.options.nemotron, vadModelPath: this.options.vadModelPath, language: this.options.language || "en", streamingDecode: !!this.options.streamingDecode })
+        this.post(child, { type: "start", paths: this.options.nemotron, vadModelPath: this.options.vadModelPath, language: this.options.language || "en", streamingDecode: this.options.streamingDecode !== false })
 
         const ok = await new Promise<boolean>((resolve) => {
             const timer = setTimeout(() => {

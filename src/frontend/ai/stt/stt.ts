@@ -1,22 +1,23 @@
 import { get, writable } from "svelte/store"
 import { Main } from "../../../types/IPC/Main"
 import { requestMain, sendMain } from "../../IPC/main"
-import { ai, language } from "../../stores"
+import { ai } from "../../stores"
 import audioProcessor from "./audioProcessor.ts?worker&url"
 
 export const audioLevelStore = writable<number>(0.0)
 
-// nemotron (english-only) is the default engine on english UIs - whisper otherwise, when
-// interpretation mode is enabled (a whisper-only feature: per-window language detection), or
-// when whisper was configured for non-english speech the streaming model cannot transcribe
+// The streaming engine is the default. It transcribes as you speak rather than in windows, and
+// since moving to the multilingual Nemotron 3.5 export it covers ~40 languages, so the UI language
+// no longer decides which engine you get.
+//
+// Whisper remains the choice for interpretation mode, which needs per-window language detection
+// that the streaming engine cannot do - it detects a language but does not report one per window.
 export function resolveSttEngine(): string {
     const stt = get(ai)?.stt || {}
     if (stt.engine) return stt.engine
 
-    const whisperOptions = stt.engineOptions?.whisper || {}
-    const interpretation = whisperOptions.interpretationMode === true
-    const englishSpeech = !whisperOptions.language || String(whisperOptions.language).startsWith("en")
-    return get(language)?.includes("en") && !interpretation && englishSpeech ? "nemotron" : "whisper"
+    const interpretation = stt.engineOptions?.whisper?.interpretationMode === true
+    return interpretation ? "whisper" : "nemotron"
 }
 
 type AudioLevelCallback = (level: number) => void
