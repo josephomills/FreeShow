@@ -57,6 +57,13 @@ interface DetectionCoordinatorOptions {
     onDetection: (ref: DetectedReference) => void
     onStatus: (state: AiScriptureState, extra?: { message?: string; keyless?: boolean }) => void
     cooldownSeconds?: number
+    /**
+     * Hold a reference sitting at the very end of the transcript until more speech follows it or
+     * the utterance closes, because it may still be being spoken. On unless explicitly disabled;
+     * the switch exists so the benchmark can measure what the guard costs and what it buys on the
+     * same audio, rather than against a remembered number.
+     */
+    holdProvisionalReferences?: boolean
 }
 
 const ROLLING_MAX_MS = 90000 // rolling transcript cap
@@ -70,6 +77,7 @@ export class DetectionCoordinator {
     private opts: DetectionCoordinatorOptions
     private bookIndex: BookIndex
     private cooldownMs: number
+    private holdProvisional: boolean
 
     // a single replaced anchor object - strictly bounded, never accumulates over a long sermon
     private anchor: AiScriptureAnchor | null = null
@@ -95,6 +103,7 @@ export class DetectionCoordinator {
         this.bookIndex = buildBookIndex(opts.books)
         this.anchorBookPrefix = this.bookIndex.bookPattern ? new RegExp("(?:^|[^a-z0-9])(?:" + this.bookIndex.bookPattern + ")[,.]?\\s+$") : null
         this.cooldownMs = (opts.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS) * 1000
+        this.holdProvisional = opts.holdProvisionalReferences !== false
     }
 
     // replace the anchor passage (what is live on the output right now)
@@ -160,7 +169,7 @@ export class DetectionCoordinator {
             // and "matthew 6 30" are each a valid reference on their own. Holding it costs one
             // segment of latency (the streaming engine emits several a second) and only until the
             // speaker says anything else at all, including the pause that closes the utterance.
-            if (match.tailAnchored && !settled) return
+            if (this.holdProvisional && match.tailAnchored && !settled) return
 
             this.tryEmit({ book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote }, "regex")
         })
@@ -198,7 +207,7 @@ export class DetectionCoordinator {
             if (verseEnd < verseStart) verseEnd = verseStart
 
             // same growing-number problem as a full reference: "verse 3" becomes "verse 33"
-            if (!settled && !normalized.slice(match.index + match[0].length).trim()) continue
+            if (this.holdProvisional && !settled && !normalized.slice(match.index + match[0].length).trim()) continue
 
             // the anchor is the chapter live on screen, so a bare verse mention is context-certain
             this.tryEmit({ book: anchor.book, bookNumber: anchor.bookNumber, chapter: anchor.chapter, verseStart, verseEnd, confidence: "high", type: "explicit", quote: match[2] }, "regex")

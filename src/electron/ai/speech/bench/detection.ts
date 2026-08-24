@@ -95,6 +95,11 @@ const CANON_BOOK_NAMES = [
 export const BENCH_BOOKS: AiScriptureBook[] = CANON_BOOK_NAMES.map((names, index) => ({ number: index + 1, canonNumber: index + 1, names: names.split("/") }))
 
 export interface DetectionReplayOptions {
+    /**
+     * Pass false to score the coordinator WITHOUT the hold-until-settled guard, which is the only
+     * way to price what it costs and what it buys on identical audio.
+     */
+    holdProvisionalReferences?: boolean
     /** Defaults to the plain English canon. Pass a real bible's table to measure that instead. */
     books?: AiScriptureBook[]
     /**
@@ -151,6 +156,7 @@ export async function replayDetection(result: RunResult, options: DetectionRepla
         llm: options.llm ?? null,
         getApiKey: options.getApiKey ?? (() => ""),
         cooldownSeconds: options.cooldownSeconds,
+        holdProvisionalReferences: options.holdProvisionalReferences,
         onDetection: (reference) => detections.push({ audioMs, reference }),
         onStatus: (state, extra) => statuses.push({ state, ...(extra?.message ? { message: extra.message } : {}) })
     })
