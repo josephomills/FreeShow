@@ -92,14 +92,7 @@ function gridTimings(chunkShiftMs: number) {
         // used a flat 500ms, which is less than one 1120ms step - under a persistent stream that
         // closes before the final word's own chunk has run. Waiting costs nothing here: the audio
         // is being decoded either way, there is no batch to assemble.
-        closeDeferSamples: Math.ceil(((chunkShiftMs + 100) / 1000) * SAMPLE_RATE),
-
-        // While an utterance is open the trailing word is held back (it may be a mid-emission BPE
-        // fragment). If the hypothesis then stops growing - a pause too short for the VAD to close
-        // on - that word would wait indefinitely, which the bench measured at 9s worst case. A full
-        // encoder step with no new tokens means the decoder had its chance and produced nothing, so
-        // the word is committed. Bounds tail latency at about two chunk shifts.
-        staticTailSamples: Math.ceil(((chunkShiftMs + 200) / 1000) * SAMPLE_RATE)
+        closeDeferSamples: Math.ceil(((chunkShiftMs + 100) / 1000) * SAMPLE_RATE)
     }
 }
 
@@ -169,8 +162,6 @@ export class NemotronStreamDriver implements TranscriptionDriver {
     private emittedChars = 0
     private lastText = ""
     private nextEmitStartMs = 0
-    /** Absolute sample index at which the hypothesis last got longer - drives the static-tail rule. */
-    private lastGrowthAtSample = 0
     /** Absolute sample index of the last decoder reset, for resetIntervalMs. */
     private lastResetAtSample = 0
 
@@ -336,7 +327,6 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         }
 
         this.assertPrefix(text)
-        if (text.length > this.lastText.length) this.lastGrowthAtSample = this.totalSamples
         this.lastText = text
 
         // A greedy RNN-T can lock into a cycle and emit the same phrase indefinitely, because the
@@ -357,12 +347,17 @@ export class NemotronStreamDriver implements TranscriptionDriver {
             return
         }
 
-        // the trailing word is held back unless the utterance is closing, or the decoder has gone
-        // a full encoder step without adding anything - at which point it is as settled as it will
-        // ever be and holding it costs latency for nothing
-        const settled = final || this.totalSamples - this.lastGrowthAtSample >= this.timings.staticTailSamples
+        // Only whole words are ever committed. The trailing token has no trailing space yet, and a
+        // greedy RNN-T grows it IN PLACE one BPE piece at a time - "[MUS" to "[MUSIC" to "[MUSIC]".
+        // Committing it early on the theory that a static hypothesis has settled produced exactly
+        // what that implies: a live transcript showing "[MUSIC" and, separately, "]". The same
+        // mechanism truncated "chapter" to "cha" and took a scripture reference with it.
+        //
+        // So it waits for the utterance to close, which the VAD does within a second of the speaker
+        // pausing. A word held a moment longer costs nothing; half a word committed is wrong on
+        // screen and cannot be taken back.
         const lastBoundary = text.lastIndexOf(" ")
-        const commitTo = settled ? text.length : lastBoundary
+        const commitTo = final ? text.length : lastBoundary
 
         if (commitTo > this.emittedChars) {
             const candidate = text.slice(this.emittedChars, commitTo).trim()
@@ -390,7 +385,6 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         this.emitFromHypothesis(true)
 
         this.inUtterance = false
-        this.lastGrowthAtSample = this.totalSamples
 
         // clears the decoded text but NOT the encoder cache (verified - see the file header), so
         // the next utterance starts warm and its first word does not wait out the priming window.

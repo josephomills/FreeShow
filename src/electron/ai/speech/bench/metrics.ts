@@ -10,6 +10,7 @@
 // the answer without being allowed to use it. That gap is a policy choice, not a model
 // limitation, which is exactly why it is worth measuring separately from everything else.
 
+import { summarizeRepetition, type RepetitionSummary } from "../repetition"
 import { align, normalizeForWer, vocabularyErrorRate, type Alignment } from "./align"
 import type { EmissionEvent, RunResult } from "./runner"
 import { describe as describeDistribution, type Distribution } from "./stats"
@@ -41,6 +42,12 @@ export interface RunMetrics {
     vocabulary?: { errors: number; total: number; rate: number; missed: string[] }
     /** Interim text that reappeared after the same words were already finalized - visible flicker. */
     interimEchoes: { audioMs: number; text: string }[]
+    /**
+     * Share of the transcript lost to decoder cycles. Only meaningful over long audio: the failure
+     * needs minutes of continuous decoding to appear, so a two-minute fixture always reports zero
+     * whatever the engine is doing.
+     */
+    repetition: RepetitionSummary
     /**
      * CPU seconds consumed per second of audio. Above 1.0 the engine cannot keep up on this
      * machine. Derived from process.cpuUsage(), not wall time - see PacerStats.cpuMs for why that
@@ -151,6 +158,7 @@ export function scoreRun(result: RunResult, reference?: string, vocabulary?: Set
         audioDurationMs: result.audioDurationMs,
         commitLag: commitLag(result),
         interimEchoes: interimEchoes(result),
+        repetition: summarizeRepetition(result.hypothesis),
         decodeCostRatio: result.audioDurationMs ? result.pacer.cpuMs / result.audioDurationMs : 0,
         wallCostRatio: result.audioDurationMs ? result.pacer.pushBlockedMs / result.audioDurationMs : 0,
         startupMs: result.startupMs,

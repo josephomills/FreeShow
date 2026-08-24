@@ -179,14 +179,23 @@ describe("NemotronStreamDriver", () => {
         expect(h.interims[h.interims.length - 1]).toBe("bravo")
     })
 
-    it("holds the trailing word back, then commits it once the hypothesis goes static", async () => {
+    it("never commits a partial trailing token, however long the hypothesis sits still", async () => {
+        // A greedy RNN-T grows the trailing token IN PLACE, one BPE piece at a time - "[MUS" to
+        // "[MUSIC" to "[MUSIC]". This driver used to commit it once the hypothesis had been static
+        // for an encoder step, on the theory that it had settled. Live transcripts showed what that
+        // really means: "[MUSIC" on screen and "]" stranded after it, and "chapter" truncated to
+        // "cha", which took a scripture reference with it.
         const h = await harness({ words: ["alpha", "bravo"] })
         h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS)
         expect(textOf(h.segments)).toBe("alpha")
 
-        // no further words arrive; a full step passes, so "bravo" is as settled as it will get.
-        // Without this rule it waits for a VAD close, which the bench measured at 9s worst case
-        h.push(NEMOTRON_CHUNK_SHIFT_MS + 500)
+        h.push(NEMOTRON_CHUNK_SHIFT_MS * 4)
+        expect(textOf(h.segments)).toBe("alpha")
+
+        // it commits when the utterance closes, which the VAD does within a second of a pause
+        h.controls.detected = false
+        h.controls.closedQueue = 1
+        h.push(NEMOTRON_CHUNK_SHIFT_MS + 300)
         expect(textOf(h.segments)).toBe("alpha bravo")
     })
 

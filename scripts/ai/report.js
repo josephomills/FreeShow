@@ -142,9 +142,10 @@ function main() {
         const lagMean = mine.map((r) => r.metrics.commitLag.lag.mean)
         const lagMax = mine.map((r) => r.metrics.commitLag.lag.max)
         const echo = mine.map((r) => r.metrics.interimEchoes.length)
+        const looped = mine.map((r) => (r.metrics.repetition ? r.metrics.repetition.share : NaN)).filter((v) => Number.isFinite(v))
         const werCi = ci(wer)
 
-        const head = [variant, mine.length, mean(decode).toFixed(3) + "x", wall.length ? mean(wall).toFixed(3) + "x" : "-", Math.round(mean(lagMean))]
+        const head = [variant, mine.length, mean(decode).toFixed(3) + "x", wall.length ? mean(wall).toFixed(3) + "x" : "-", looped.length ? (mean(looped) * 100).toFixed(1) + "%" : "-", Math.round(mean(lagMean))]
         const middle = [wer.length ? (mean(wer) * 100).toFixed(1) + "%" : "-", werCi ? `${(werCi.low * 100).toFixed(1)}-${(werCi.high * 100).toFixed(1)}` : "n<2"]
         if (!withDetection) return [...head, Math.round(Math.max(...lagMax)), ...middle, echo.reduce((a, b) => a + b, 0)]
 
@@ -165,12 +166,16 @@ function main() {
         return [...head, ...middle, expected ? ((matched / expected) * 100).toFixed(1) + "%" : "-", expected ? (recallCi ? `${(recallCi.low * 100).toFixed(1)}-${(recallCi.high * 100).toFixed(1)}` : "n<2") : "-", judged ? ((matched / judged) * 100).toFixed(1) + "%" : "-", fpPerMinute.toFixed(2), ms(percentile(latencies, 50)), ms(percentile(latencies, 95))]
     })
 
-    const headers = withDetection ? ["variant", "n", "cpu", "wall", "lag mean", "WER", "WER 95% CI", "recall", "recall CI", "prec", "fp/min", "det50", "det95"] : ["variant", "n", "cpu", "wall", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]
+    const headers = withDetection
+        ? ["variant", "n", "cpu", "wall", "looped", "lag mean", "WER", "WER 95% CI", "recall", "recall CI", "prec", "fp/min", "det50", "det95"]
+        : ["variant", "n", "cpu", "wall", "looped", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]
 
     console.log(table(rows, headers))
     console.log(`\ncpu  = CPU seconds per second of audio - the engine's real cost. Above 1.0 it cannot keep up.`)
     console.log(`wall = the same thing in wall time. It runs LOWER than cpu because the decoder uses two`)
     console.log(`       threads, so cpu sums across them - cpu is total work, wall is elapsed time.`)
+    console.log(`looped = share of the transcript lost to decoder cycles. Only meaningful over LONG audio -`)
+    console.log(`       the failure needs minutes of continuous decoding, so short clips always read 0%.`)
     console.log(`lag  = ms a word is visible as interim before it is committed; detection only sees committed`)
     console.log(`       text.`)
     if (!withDetection) {

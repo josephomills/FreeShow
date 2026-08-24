@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { findRepeatedTail, hasRepeatedTail } from "./repetition"
+import { findRepeatedTail, hasRepeatedTail, summarizeRepetition } from "./repetition"
 
 describe("phrase repetition", () => {
     it("catches the loop seen in a live transcript", () => {
@@ -41,5 +41,25 @@ describe("phrase repetition", () => {
     it("says nothing about short text", () => {
         expect(hasRepeatedTail("")).toBe(false)
         expect(hasRepeatedTail("the king of")).toBe(false)
+    })
+})
+
+describe("summarizing a whole transcript", () => {
+    it("reports the share lost to cycles", () => {
+        const summary = summarizeRepetition("he opened the book and he saith the LORD and he saith the LORD and he saith the LORD then closed it")
+        expect(summary.runs).toBe(1)
+        expect(summary.longestRun).toBe(15)
+        expect(summary.share).toBeGreaterThan(0.5)
+    })
+
+    it("counts separate cycles separately", () => {
+        const summary = summarizeRepetition("amen amen amen and later the king of the king of the king of the end")
+        expect(summary.runs).toBe(2)
+    })
+
+    it("reports nothing for ordinary speech", () => {
+        const summary = summarizeRepetition("and he went up to the mountain to pray alone that evening")
+        expect(summary.loopedWords).toBe(0)
+        expect(summary.share).toBe(0)
     })
 })

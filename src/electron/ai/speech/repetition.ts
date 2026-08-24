@@ -64,3 +64,63 @@ export function findRepeatedTail(text: string): number {
 export function hasRepeatedTail(text: string): boolean {
     return findRepeatedTail(text) >= 0
 }
+
+export interface RepetitionSummary {
+    /** Words inside a phrase repeated back to back at least MIN_REPEATS times. */
+    loopedWords: number
+    totalWords: number
+    /** Distinct runs, so one long cycle is not confused with many short ones. */
+    runs: number
+    /** The longest run, in words - what a viewer would actually see fill the screen. */
+    longestRun: number
+    share: number
+}
+
+/**
+ * Scan a whole transcript for cycles, not just its tail.
+ *
+ * The tail check is what a live driver needs; this is what a BENCHMARK needs, because degeneration
+ * is only visible over minutes of continuous decoding and a fixture set of two-minute clips cannot
+ * show it at all. Reporting the share of a transcript lost to cycles is the metric that would have
+ * caught a regression measured as an improvement.
+ */
+export function summarizeRepetition(text: string): RepetitionSummary {
+    const tokens = tokenize(text)
+    const looped = new Array<boolean>(tokens.length).fill(false)
+    let runs = 0
+    let longestRun = 0
+
+    for (let start = 0; start < tokens.length; start++) {
+        if (looped[start]) continue
+
+        for (let size = 1; size <= MAX_PHRASE_TOKENS; size++) {
+            if (start + size * MIN_REPEATS > tokens.length) break
+
+            const phrase = tokens
+                .slice(start, start + size)
+                .map((token) => token.text)
+                .join(" ")
+            let repeats = 1
+            while (start + size * (repeats + 1) <= tokens.length) {
+                const next = tokens
+                    .slice(start + size * repeats, start + size * (repeats + 1))
+                    .map((token) => token.text)
+                    .join(" ")
+                if (next !== phrase) break
+                repeats++
+            }
+
+            if (repeats >= MIN_REPEATS) {
+                const length = size * repeats
+                for (let at = start; at < start + length; at++) looped[at] = true
+                runs++
+                longestRun = Math.max(longestRun, length)
+                start += length - 1
+                break
+            }
+        }
+    }
+
+    const loopedWords = looped.filter(Boolean).length
+    return { loopedWords, totalWords: tokens.length, runs, longestRun, share: tokens.length ? loopedWords / tokens.length : 0 }
+}

@@ -25,7 +25,7 @@ const path = require("path")
 const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma"]
 
 function parseArgs(argv) {
-    const args = { count: 5, start: 300, duration: 120, set: "sermons", ext: null }
+    const args = { count: 5, start: 300, duration: 120, set: "sermons", ext: null, full: false }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i].replace(/^--/, "")
         const value = argv[i + 1]
@@ -34,6 +34,13 @@ function parseArgs(argv) {
         else if (key === "start") args.start = Number(value)
         else if (key === "duration") args.duration = Number(value)
         else if (key === "set") args.set = value
+        else if (key === "full") {
+            // whole messages rather than an excerpt. Decoder degeneration needs minutes of
+            // continuous audio to appear, so a set of two-minute clips cannot show it at all -
+            // which is how a change that made live transcription worse measured as an improvement.
+            args.full = true
+            continue
+        }
         else continue
         i++
     }
@@ -112,7 +119,7 @@ function main() {
     // an announcement, and the point is to exercise sustained continuous speech
     const chosen = sources
         .map((file) => ({ file, seconds: durationSeconds(file) }))
-        .filter((entry) => entry.seconds >= args.start + args.duration)
+        .filter((entry) => entry.seconds >= (args.full ? 600 : args.start + args.duration))
         .sort((a, b) => b.seconds - a.seconds)
         .slice(0, args.count)
 
@@ -132,16 +139,17 @@ function main() {
         const target = path.join(root, relative)
 
         // -ss before -i seeks by keyframe (fast); 16 kHz mono s16 matches the renderer's capture
-        execFileSync("ffmpeg", ["-y", "-v", "error", "-ss", String(args.start), "-t", String(args.duration), "-i", entry.file, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", target])
+        const cut = args.full ? [] : ["-ss", String(args.start), "-t", String(args.duration)]
+        execFileSync("ffmpeg", ["-y", "-v", "error", ...cut, "-i", entry.file, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", target], { maxBuffer: 1 << 28 })
 
         fixtures.push({
             id,
             tier: "sermon",
             file: relative,
-            durationMs: args.duration * 1000,
+            durationMs: Math.round((args.full ? entry.seconds : args.duration) * 1000),
             timingSource: "none",
             expected: [],
-            notes: `excerpt at ${args.start}s of a local recording; source not recorded here on purpose`
+            notes: args.full ? "a whole message, so decoder degeneration has room to appear" : `excerpt at ${args.start}s of a local recording; source not recorded here on purpose`
         })
         console.log(`  ${relative}  (${(fs.statSync(target).size / 1024 / 1024).toFixed(1)} MB)`)
     })
