@@ -755,6 +755,8 @@ describe("DetectionCoordinator", () => {
             const coordinator = new DetectionCoordinator({ books: WITH_NUMBERS, llm: null, getApiKey: () => "", onDetection, onStatus: vi.fn() })
             coordinator.updateContext({ book: "Hebrews", bookNumber: 58, chapter: 4, verseStart: 1, verseEnd: 1 })
             coordinator.onTranscriptSegment({ text, startMs: 0, endMs: 3000, utteranceEnd: true })
+            // a chapter with no spoken verse waits to see whether one follows, so let the clock run
+            coordinator.onTranscriptSegment({ text: "amen", startMs: 9000, endMs: 10000, utteranceEnd: true })
             coordinator.stop()
             return onDetection.mock.calls.map((call) => call[0])
         }
@@ -783,6 +785,78 @@ describe("DetectionCoordinator", () => {
 
         it("still projects Numbers with a verse", () => {
             expect(detect("numbers chapter twelve verse three")[0]).toMatchObject({ bookNumber: 4, chapter: 12, verseStart: 3 })
+        })
+    })
+
+    describe("a chapter with no spoken verse", () => {
+        // Measured on real sermons: "Ephesians chapter 2" projected Ephesians 2:1, then the preacher
+        // said "verse 8" and it corrected itself on screen. Verse 1 is this reference's DEFAULT, not
+        // a word anyone said, which is what separates it from a reference the speaker finished.
+        function feed(coordinator: DetectionCoordinator, parts: [string, number][]) {
+            parts.forEach(([text, endMs]) => coordinator.onTranscriptSegment({ text, startMs: endMs - 1000, endMs, utteranceEnd: true }))
+        }
+
+        it("is not projected while a verse may still follow", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [["turn with me to john chapter three", 2000]])
+
+            expect(onDetection).not.toHaveBeenCalled()
+            coordinator.stop()
+        })
+
+        it("is replaced by the fuller reference when the verse arrives", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [
+                ["turn with me to john chapter three", 2000],
+                ["verse sixteen for god so loved", 4000]
+            ])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", chapter: 3, verseStart: 16 })
+            coordinator.stop()
+        })
+
+        it("is projected once the wait passes with no verse", () => {
+            // the preacher really did mean the whole chapter
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [
+                ["turn with me to john chapter three", 2000],
+                ["and let us read it together slowly", 9000]
+            ])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", chapter: 3, verseStart: 1 })
+            coordinator.stop()
+        })
+
+        it("is projected when speech ends before the wait does", () => {
+            // the wait only ends when speech does, and a reference lost at the end of a session is
+            // worse than one shown a moment late
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [["turn with me to john chapter three", 2000]])
+            coordinator.stop()
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", chapter: 3, verseStart: 1 })
+        })
+
+        it("does not delay a reference the speaker finished", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [["turn with me to john chapter three verse sixteen and read", 2000]])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ chapter: 3, verseStart: 16 })
+            coordinator.stop()
         })
     })
 })

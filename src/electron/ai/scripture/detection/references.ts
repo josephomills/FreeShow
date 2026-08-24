@@ -145,6 +145,11 @@ interface ReferenceMatch {
     confidence: "high" | "medium" | "low"
     quote: string
     /**
+     * No verse was spoken - verseStart is the default of 1, not something the speaker said. "Turn
+     * to Ephesians chapter 2" is a complete reference right up until "verse 8" arrives.
+     */
+    bareChapter: boolean
+    /**
      * Nothing but whitespace follows this match in the text it was found in, so the reference may
      * still be being spoken - "matthew 6" is a complete reference to Matthew 6:1 right up until
      * "33" arrives. Computed here rather than by the caller because the offsets belong to the
@@ -254,7 +259,7 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         const confidence: "high" | "medium" | "low" = hasVerse || unglued || hasCue ? "high" : "medium"
 
         const matchEnd = match.index + match[0].length
-        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote, tailAnchored: !normalized.slice(matchEnd).trim() })
+        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote, bareChapter: !hasVerse && !unglued, tailAnchored: !normalized.slice(matchEnd).trim() })
         if (options.claimSpan) claimedSpans.push({ from: match.index, to: match.index + match[0].length })
     }
 

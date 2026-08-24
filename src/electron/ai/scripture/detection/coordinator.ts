@@ -73,6 +73,20 @@ const LLM_MIN_NEW_WORDS = 15 // don't call the LLM again until this much new spe
 const LLM_ALREADY_DETECTED_MS = 180000 // recently emitted refs sent to the LLM so it skips them
 const DEFAULT_COOLDOWN_SECONDS = 90 // suppress re-emitting an intersecting reference within this window
 
+/**
+ * How long a chapter with no spoken verse waits to see whether one follows.
+ *
+ * "Ephesians chapter 2" is a complete reference to Ephesians 2:1, and preachers say it on the way
+ * to "verse 8" constantly - so projecting it immediately put the wrong passage on screen and then
+ * corrected itself. Verse 1 is a DEFAULT here, not something anyone said, which is what separates
+ * this from a reference the speaker finished.
+ *
+ * Measured in audio time, so it does not depend on how fast the machine is. A preacher who really
+ * did mean the whole chapter waits this long to see it; one who is mid-reference is not
+ * contradicted on screen.
+ */
+const BARE_CHAPTER_HOLD_MS = 4000
+
 export class DetectionCoordinator {
     private opts: DetectionCoordinatorOptions
     private bookIndex: BookIndex
@@ -84,6 +98,8 @@ export class DetectionCoordinator {
     private anchorBookPrefix: RegExp | null
 
     private segments: TranscriptSegment[] = []
+    /** Chapters seen with no spoken verse, waiting to learn whether one follows. Keyed book.chapter. */
+    private pendingChapters = new Map<string, { candidate: DetectionCandidate; atMs: number }>()
     private emitted = new Map<string, EmittedReference[]>() // key: "bookNumber.chapter"
     private idCounter = 0
     private stopped = false
@@ -138,6 +154,11 @@ export class DetectionCoordinator {
     }
 
     stop(): void {
+        // a chapter still waiting for a verse that never came is what the speaker meant after all;
+        // the wait only ends when speech does, and this is where speech ends
+        this.pendingChapters.forEach((pending) => this.tryEmit(pending.candidate, "regex"))
+        this.pendingChapters.clear()
+
         this.stopped = true
         this.llmRerunPending = false
         if (this.llmController) {
@@ -146,6 +167,7 @@ export class DetectionCoordinator {
         }
         this.segments = []
         this.emitted.clear()
+        this.pendingChapters.clear()
     }
 
     // TIER 1
@@ -162,7 +184,15 @@ export class DetectionCoordinator {
             .map((segment) => segment.text)
             .join(" ")
 
-        matchReferences(windowText, this.bookIndex).forEach((match) => {
+        const newestMs = this.segments[this.segments.length - 1].endMs
+        const matches = matchReferences(windowText, this.bookIndex)
+
+        // a chapter the speaker went on to give a verse for is not a bare chapter any more
+        matches.forEach((match) => {
+            if (!match.bareChapter) this.pendingChapters.delete(`${match.bookNumber}.${match.chapter}`)
+        })
+
+        matches.forEach((match) => {
             // A reference at the very end of the transcript may still be being spoken. Emitting it
             // immediately is why "Matthew 6:33" reached the screen as Matthew 6:1, then 6:30, then
             // 6:33 - three passages in just over a second, two of them wrong, because "matthew 6"
@@ -171,10 +201,31 @@ export class DetectionCoordinator {
             // speaker says anything else at all, including the pause that closes the utterance.
             if (this.holdProvisional && match.tailAnchored && !settled) return
 
-            this.tryEmit({ book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote }, "regex")
+            const candidate: DetectionCandidate = { book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote }
+
+            // A chapter with no spoken verse waits to learn whether one follows - see
+            // BARE_CHAPTER_HOLD_MS. Verse 1 is this reference's default, not the speaker's word.
+            if (this.holdProvisional && match.bareChapter) {
+                const key = `${match.bookNumber}.${match.chapter}`
+                if (!this.pendingChapters.has(key)) this.pendingChapters.set(key, { candidate, atMs: newestMs })
+                return
+            }
+
+            this.tryEmit(candidate, "regex")
         })
 
+        this.flushPendingChapters(newestMs)
+
         this.runAnchorTier1(windowText, settled)
+    }
+
+    /** Emit chapters whose wait is up - nobody gave them a verse, so the chapter is what was meant. */
+    private flushPendingChapters(newestMs: number) {
+        for (const [key, pending] of this.pendingChapters) {
+            if (newestMs - pending.atMs < BARE_CHAPTER_HOLD_MS) continue
+            this.pendingChapters.delete(key)
+            this.tryEmit(pending.candidate, "regex")
+        }
     }
 
     // bare "verse N" / "verses N to M" mentions (no book named) resolve against the anchor passage
