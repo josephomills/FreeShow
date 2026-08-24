@@ -85,9 +85,30 @@ export class SpeechToText {
         if (!stream) return { ok: false, error: "microphone_access" }
 
         this.stream = stream
+        this.watchStreamHealth(stream)
         this.captureAudioContext(stream)
 
         return { ok: true }
+    }
+
+    // A live capture can die without an error anywhere: macOS ends the input track when the
+    // device switches (AirPods connecting, an interface unplugged), and nothing downstream can
+    // tell that from a quiet room - a real service lost 2.5 minutes of audio this way, and the
+    // decode seam across the hole is where mangled text comes from. The track says so when it
+    // happens; restarting the capture is the whole recovery (the engine keeps running and just
+    // sees a short gap).
+    private static watchStreamHealth(stream: MediaStream) {
+        const track = stream.getAudioTracks()[0]
+        if (!track) return
+
+        track.addEventListener("ended", () => {
+            if (this.stream !== stream) return // an intentional stop or a newer capture owns the session
+            console.warn("[AI STT] microphone track ended (device switched or unplugged) - restarting the capture")
+            void this.restartCapture()
+        })
+        // muted is usually transient (device pipeline hiccup) - worth a trace, not a restart
+        track.addEventListener("mute", () => console.warn("[AI STT] microphone track muted - audio is not flowing"))
+        track.addEventListener("unmute", () => console.info("[AI STT] microphone track unmuted"))
     }
 
     static disable() {
@@ -161,6 +182,16 @@ export class SpeechToText {
             // & the worklet only converts/frames samples - it either honors 16000 or throws
             const ac = new AudioContext({ sampleRate: 16000 })
             this.ac = ac
+
+            // the context can be suspended out from under a background window (power saving,
+            // output device changes) - resume it or the worklet silently stops pushing audio
+            ac.addEventListener("statechange", () => {
+                if (this.ac !== ac) return
+                if (ac.state === "suspended") {
+                    console.warn("[AI STT] audio context was suspended - resuming")
+                    ac.resume().catch((err) => console.error("[AI STT] could not resume the audio context:", err))
+                }
+            })
 
             // 1. Create source node
             const sourceNode = ac.createMediaStreamSource(stream)

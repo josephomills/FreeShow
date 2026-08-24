@@ -12,6 +12,9 @@ import { NemotronTranscriber } from "./transcribers/NemotronTranscriber"
 import { WhisperTranscriber } from "./transcribers/WhisperTranscriber"
 
 type SttEngine = WhisperTranscriber | NemotronTranscriber
+
+// the renderer pushes ~10 times a second - a 2s hole is a dead capture, not scheduling jitter
+const AUDIO_GAP_WARN_MS = 2000
 type SegmentListener = (segment: TranscriberSegment) => void
 
 export class SpeechToText {
@@ -23,6 +26,7 @@ export class SpeechToText {
     // opt-in diagnostic: keeps exactly what the engine heard, so a fault reported from a live
     // service can be reproduced instead of guessed at - see audioRecorder.ts
     private static recorder = new SessionAudioRecorder()
+    private static lastAudioAt = 0
 
     static async listen(engine: string, options: SttEngineOptions): Promise<{ started: boolean; error?: string }> {
         this.stopInternal(false)
@@ -40,6 +44,7 @@ export class SpeechToText {
         }
 
         this.transcriberEngine = created.transcriber
+        this.lastAudioAt = 0
 
         try {
             await this.transcriberEngine.start()
@@ -79,6 +84,16 @@ export class SpeechToText {
 
     // audio arriving before START or after STOP is a safe no-op: the engine is null outside a session
     static pushAudio(buffer: Uint8Array) {
+        // The capture side can die silently: a live session's recording came up 2.5 minutes short
+        // of its wall-clock span with no error anywhere, and the missing stretches took a reported
+        // failure with them. The engine cannot tell a quiet room from a dead microphone - this can,
+        // and a decode seam across such a gap is exactly where mangled commits come from.
+        const now = Date.now()
+        if (this.transcriberEngine && this.lastAudioAt && now - this.lastAudioAt > AUDIO_GAP_WARN_MS) {
+            console.warn(`[ai] audio capture gapped for ${((now - this.lastAudioAt) / 1000).toFixed(1)}s - the transcript has a hole and the seam may decode wrong`)
+        }
+        this.lastAudioAt = now
+
         this.recorder.write(buffer)
         this.transcriberEngine?.pushAudio(buffer)
     }
