@@ -4,6 +4,7 @@
 
 import type { AiScriptureBook, AiScriptureTranslation, AiScriptureState, DetectedReference } from "../../../../types/ai/AiScripture"
 import { normalizeSpokenNumbers } from "../../commands/spokenNumbers"
+import { maxVerseInChapter } from "../chapterVerseCounts"
 import { LLM_API_TIMEOUT } from "../../llm/models/APIModel"
 import { getLLMScriptureProvider } from "../llmTalkScripture"
 import type { BookIndex } from "./references"
@@ -24,6 +25,10 @@ export interface AiScriptureAnchor {
 // "verse 5", "verse number 5", "the 5th verse" - a range may follow ("verses 3 to 5", "3 and 4");
 // "and" as a range word is safe here because the verse word is present by construction
 const BARE_VERSE_REGEX = /(^|[^a-z0-9])((?:the\s+)?(?:verses?\s+(?:number\s+)?(?<n1>\d{1,3})\b|(?<n2>\d{1,3})(?:st|nd|rd|th)\s+verses?\b)(?:\s*(?:-|–|to\b|through\b|and\b|till\b|until\b)\s*(?<end>\d{1,3})\b)?)/g
+
+// a bare number while a passage is live: "...with all boldness. Thirty one. And when they had
+// prayed..." - reading straight through, the next verse is cued by its number alone
+const BARE_NUMBER_REGEX = /(^|[^a-z0-9:])(\d{1,3})\b(?!\s*:)/g
 
 interface TranscriptSegment {
     text: string
@@ -265,6 +270,28 @@ export class DetectionCoordinator {
 
             // the anchor is the chapter live on screen, so a bare verse mention is context-certain
             this.tryEmit({ book: anchor.book, bookNumber: anchor.bookNumber, chapter: anchor.chapter, verseStart, verseEnd, confidence: "high", type: "explicit", quote: match[2] }, "regex")
+        }
+
+        // Reading straight through, the next verse is often cued by its number ALONE: "...speak
+        // your word with all boldness. Thirty one. And when they had prayed..." (a live service,
+        // reading Acts 4 - verse 31 was only caught later by the quote matcher). Only the number
+        // that is EXACTLY the next verse after the live one counts, and only while that verse
+        // exists: any other number in preaching is a count, an age, an amount - never this one.
+        const nextVerse = anchor.verseEnd + 1
+        if (nextVerse <= (maxVerseInChapter(anchor.bookNumber, anchor.chapter) || Infinity)) {
+            BARE_NUMBER_REGEX.lastIndex = 0
+            while ((match = BARE_NUMBER_REGEX.exec(normalized)) !== null) {
+                if (parseInt(match[2], 10) !== nextVerse) continue
+                const start = match.index + match[1].length
+                if (covered.some(([from, to]) => start >= from && start < to)) continue
+                // "verse 31"/"chapter 31" carry their own word and their own rules
+                if (/(?:verses?|chapters?|numbers?)\s*$/.test(normalized.slice(0, start))) continue
+                if (this.anchorBookPrefix?.test(normalized.slice(0, start))) continue
+                // the number may still be growing ("31" on its way to "310")
+                if (this.holdProvisional && !settled && !normalized.slice(match.index + match[0].length).trim()) continue
+
+                this.tryEmit({ book: anchor.book, bookNumber: anchor.bookNumber, chapter: anchor.chapter, verseStart: nextVerse, verseEnd: nextVerse, confidence: "high", type: "explicit", quote: match[2] }, "regex")
+            }
         }
     }
 

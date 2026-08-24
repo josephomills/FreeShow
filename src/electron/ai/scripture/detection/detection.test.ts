@@ -648,6 +648,57 @@ describe("DetectionCoordinator", () => {
     })
 
     describe("anchor context (bounded session context)", () => {
+        // Reading straight through, the next verse is often cued by its number alone: "...with
+        // all boldness. Thirty one. And when they had prayed..." (live service, Acts 4 - verse
+        // 31 was only caught later by the quote matcher)
+        describe("bare next-verse number while reading", () => {
+            it("advances on the number that is exactly the next verse", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                coordinator.updateContext({ book: "Acts", bookNumber: 44, chapter: 4, verseStart: 29, verseEnd: 30 })
+
+                coordinator.onTranscriptSegment({ text: "now thirty one and when they had prayed", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).toHaveBeenCalledTimes(1)
+                expect(onDetection.mock.calls[0][0]).toMatchObject({ bookNumber: 44, chapter: 4, verseStart: 31, verseEnd: 31, confidence: "high" })
+
+                coordinator.stop()
+            })
+
+            it("ignores every number that is not the next verse", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                coordinator.updateContext({ book: "Acts", bookNumber: 44, chapter: 4, verseStart: 29, verseEnd: 30 })
+
+                coordinator.onTranscriptSegment({ text: "there were forty people and three thousand were saved and 12 apostles", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).not.toHaveBeenCalled()
+
+                coordinator.stop()
+            })
+
+            it("never advances past the chapter's last verse", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                // John 3 has 36 verses - anchored at its end, "thirty seven" is not a verse
+                coordinator.updateContext({ book: "John", bookNumber: 43, chapter: 3, verseStart: 36, verseEnd: 36 })
+
+                coordinator.onTranscriptSegment({ text: "thirty seven people came forward", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).not.toHaveBeenCalled()
+
+                coordinator.stop()
+            })
+
+            it("leaves 'chapter <next>' to the chapter rules", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                coordinator.updateContext({ book: "Acts", bookNumber: 44, chapter: 4, verseStart: 30, verseEnd: 30 })
+
+                coordinator.onTranscriptSegment({ text: "over in chapter thirty one of another book", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).not.toHaveBeenCalled()
+
+                coordinator.stop()
+            })
+        })
+
         it("resolves bare 'verse N' mentions against the anchor", () => {
             const onDetection = vi.fn()
             const coordinator = createCoordinator(onDetection)
