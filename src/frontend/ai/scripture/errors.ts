@@ -8,6 +8,7 @@ const ERROR_LANG_KEYS: { [code: string]: string } = {
     whisper_not_installed: "ai.whisper_not_installed",
     whisper_model_missing: "ai.error_model_missing",
     nemotron_model_missing: "ai.nemotron_not_downloaded",
+    nemotron_model_outdated: "ai.nemotron_outdated",
     nemotron_unsupported: "ai.nemotron_unsupported"
 }
 

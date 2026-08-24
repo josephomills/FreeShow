@@ -1,4 +1,6 @@
 export interface EngineStatus {
+    /** Files are present but not the pinned revision - a re-download is what fixes it, not a first download. */
+    outdated?: boolean
     ready: boolean
     localPath?: string | null
     downloadedModels?: string[]

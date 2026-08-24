@@ -50,7 +50,7 @@ export class SpeechToText {
             // the defaulted pick can be unsupported (sherpa-onnx missing) or simply not downloaded
             // (the ~660MB model is a manual download) - only an explicit nemotron choice should
             // surface those errors instead of falling back to whisper
-            const fallbackErrors = ["nemotron_unsupported", "nemotron_model_missing"]
+            const fallbackErrors = ["nemotron_unsupported", "nemotron_model_missing", "nemotron_model_outdated"]
             if (!get(ai)?.stt?.engine && engine === "nemotron" && fallbackErrors.includes(result?.error || "")) {
                 console.info(`[AI STT] defaulted nemotron unavailable (${result?.error}) - falling back to whisper`)
                 const retry = await requestMain(Main.AI_LISTEN_START, { engine: "whisper", engineOptions: get(ai)?.stt?.engineOptions?.whisper || {} }, undefined, 60000)

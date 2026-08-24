@@ -3,6 +3,7 @@ import path from "path"
 import { ToMain } from "../../../../types/IPC/ToMain"
 import { sendToMain } from "../../../IPC/main"
 import { DownloadManager } from "../DownloadManager"
+import { verifyModel } from "../../speech/nemotron/integrity"
 import { MODEL_BASE_URL, NEMOTRON_MODEL_BYTES, NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE, VAD_MODEL_SHA256, VAD_MODEL_URL } from "./nemotronFiles"
 
 // the pinned file table and source URLs live in nemotronFiles.ts, so the runtime loader and the
@@ -25,6 +26,10 @@ export class NemotronSetupManager {
 
         const jobs = [...Object.values(NEMOTRON_MODEL_FILES).map((entry) => ({ url: `${MODEL_BASE_URL}/${entry.file}`, file: entry.file, sha256: entry.sha256 })), { url: VAD_MODEL_URL, file: NEMOTRON_VAD_FILE, sha256: VAD_MODEL_SHA256 }]
 
+        // digests of every pinned file as this run sees them, so the integrity stamp can be written
+        // from what was already computed instead of reading 662 MB back off the disk
+        const digests: { [name: string]: string } = {}
+
         // one download spans several files, so progress is reported against the known total rather than per file
         let completedBytes = 0
         for (const job of jobs) {
@@ -33,6 +38,7 @@ export class NemotronSetupManager {
             // a file from an earlier run only counts when its checksum proves it is exactly the pinned content
             if (await this.verifyEngine(target)) {
                 if ((await dlm.computeSha256(target)) === job.sha256) {
+                    digests[job.file] = job.sha256
                     completedBytes += fs.statSync(target).size
                     continue
                 }
@@ -53,12 +59,17 @@ export class NemotronSetupManager {
                     fs.unlinkSync(target)
                     throw new Error(`Downloaded ${job.file} failed checksum verification`)
                 }
+                digests[job.file] = job.sha256
             } catch (err) {
                 if (dlm.isAbortError(err)) return { ok: false, error: "Download was cancelled." }
                 return dlm.reportError(`Failed to download Nemotron model: ${dlm.errorMessage(err)}`)
             }
             completedBytes = base + fs.statSync(target).size
         }
+
+        // stamp what just landed, so the first session does not re-hash everything to learn what
+        // this loop already proved
+        await verifyModel(outputFolder, digests)
 
         return dlm.reportComplete()
     }

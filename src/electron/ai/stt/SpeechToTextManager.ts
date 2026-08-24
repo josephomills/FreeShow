@@ -2,7 +2,7 @@ import { existsSync } from "fs"
 import type { SttEngineOptions } from "../../../types/ai/AiSettings"
 import { ToMain } from "../../../types/IPC/ToMain"
 import { sendToMain } from "../../IPC/main"
-import { getNemotronModelPaths, getVadModelPath, isNemotronSupported } from "../speech/nemotron/manager"
+import { getNemotronModelIntegrity, getNemotronModelPaths, getVadModelPath, isNemotronSupported } from "../speech/nemotron/manager"
 import { isModelReady, resolveWhisper } from "../speech/whisper/manager"
 import type { TranscriberSegment } from "../speech/types"
 import { NemotronTranscriber } from "./transcribers/NemotronTranscriber"
@@ -104,6 +104,14 @@ export class SpeechToText {
             const nemotron = getNemotronModelPaths()
             const vadModelPath = getVadModelPath()
             if (!nemotron || !vadModelPath) return { error: "nemotron_model_missing" }
+
+            // present is not the same as correct: a model from an earlier pinned revision still
+            // transcribes, so nothing about it looks wrong, but it is not the model this build was
+            // written and measured against. First call after a download hashes ~662 MB (~1.7s),
+            // every call after that reads a stamp.
+            const integrity = await getNemotronModelIntegrity()
+            if (integrity === "missing") return { error: "nemotron_model_missing" }
+            if (integrity === "outdated") return { error: "nemotron_model_outdated" }
 
             return { transcriber: new NemotronTranscriber({ ...options, nemotron, vadModelPath }, onSegment, onError, this.onInterim.bind(this)) }
         }

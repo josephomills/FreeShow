@@ -9,6 +9,13 @@
 // Pinned to a specific repo revision (not "main") and to per-file SHA-256 hashes, so exactly
 // these bytes land or nothing does - the hashes are the LFS checksums Hugging Face publishes for
 // this revision.
+/**
+ * The pinned repo revision. Stamped beside a verified model (speech/nemotron/integrity.ts) so a
+ * model left over from an earlier pin is recognised as outdated instead of being loaded silently.
+ * Must be changed together with MODEL_BASE_URL and the hashes below.
+ */
+export const NEMOTRON_MODEL_REVISION = "f13b0c6a48186fdd9fdd8d203b9527b0b709b09f"
+
 export const MODEL_BASE_URL = "https://huggingface.co/csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14/resolve/f13b0c6a48186fdd9fdd8d203b9527b0b709b09f"
 
 export const NEMOTRON_MODEL_FILES = {
