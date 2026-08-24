@@ -7,6 +7,7 @@ import type { AiScriptureCommandEvent, AiScriptureTranslation } from "../../../.
 import type { FeatureCommandSpec } from "../../commands/commandStream"
 import { alternation, BARE_TAIL, CONDITIONAL_BEFORE, LEAD, matchCommand, mergeLocalizedGrammar, NARRATION_BEFORE, phraseOf, sequenceSpan, TAIL_CHARS } from "../../commands/grammar"
 import { normalizeSpokenNumbers, NUMBER_HOMOPHONES, parseNumberToken } from "../../commands/spokenNumbers"
+import { isSpokenAcronym, matchSpokenAcronym } from "./spokenAcronyms"
 import { VERSE_WORD_MISHEARINGS } from "../vocabulary"
 import { COMMAND_GRAMMAR } from "./grammar"
 
@@ -216,6 +217,23 @@ export function detectScriptureCommand(text: string, language: string, translati
         if (announced) {
             const bibleId = byToken.get(announced[1].replace(/\s+/g, " "))
             if (bibleId) return { type: "translation", bibleId, phrase: phraseOf(announced) }
+        }
+
+        // 5c. an acronym name the engine mangled - "give me NASB" arrives as "give me any be",
+        // because letter runs are where streaming ASR is weakest. Only shapes that already
+        // declare a translation request are considered: the words right before the translation
+        // word ("the any be version"), or an imperative's short remaining tail ("give me any
+        // be."). The phonetic match itself only answers when one acronym is the unique fit
+        // (spokenAcronyms.ts) - so a miss keeps the current translation rather than guessing
+        const acronyms = translations.flatMap((translation) => translation.names.filter(isSpokenAcronym).map((name) => ({ id: translation.id, acronym: name })))
+        if (acronyms.length) {
+            const beforeTransWord = tail.match(new RegExp(LEAD + imp + "\\s+" + art + "((?:[a-z0-9']+\\s+){1,3})" + transWord + "(?![a-z0-9])"))
+            const imperativeTail = tail.match(new RegExp(LEAD + imp + "\\s+" + art + "((?:[a-z0-9']+(?:\\s+|(?=[.,!?])|$)){1,3})" + BARE_TAIL))
+            const candidatePhrase = beforeTransWord?.[1] || imperativeTail?.[1] || ""
+            if (candidatePhrase.trim()) {
+                const hit = matchSpokenAcronym(candidatePhrase, acronyms)
+                if (hit) return { type: "translation", bibleId: hit.id, phrase: phraseOf((beforeTransWord || imperativeTail)!) }
+            }
         }
     }
 

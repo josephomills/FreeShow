@@ -14,6 +14,43 @@ const detect = (text: string, language = "en") => detectScriptureCommand(text, l
 
 describe("detectScriptureCommand", () => {
     describe("english positives", () => {
+        // SPOKEN ACRONYMS. Letter runs are where streaming ASR is weakest: a live service produced
+        // "Give me any be" for "Give me NASB". The names themselves generate their plausible
+        // spoken renderings (spokenAcronyms.ts), so any installed acronym is covered untended.
+        describe("misheard acronym names", () => {
+            const withNasb = [...TRANSLATIONS, { id: "nasb-id", names: ["New American Standard Bible", "NASB"] }]
+
+            it("recovers 'give me any be' as NASB", () => {
+                expect(detectScriptureCommand("give me any be", "en", withNasb)).toEqual({ type: "translation", bibleId: "nasb-id", phrase: "give me any be" })
+            })
+
+            it("recovers the mangled name next to the translation word", () => {
+                expect(detectScriptureCommand("switch to the any be version please", "en", withNasb)).toMatchObject({ type: "translation", bibleId: "nasb-id" })
+            })
+
+            it("recovers 'an IV' as NIV at the end of an imperative", () => {
+                expect(detectScriptureCommand("put up an IV", "en", withNasb)).toMatchObject({ type: "translation", bibleId: "niv-id" })
+            })
+
+            it("never fires on an imperative with ordinary words", () => {
+                expect(detectScriptureCommand("give me grace", "en", withNasb)).toBeNull()
+                expect(detectScriptureCommand("show me the word", "en", withNasb)).toBeNull()
+                expect(detectScriptureCommand("give me faith to believe", "en", withNasb)).toBeNull()
+            })
+
+            it("never fires from narration that only mentions letters", () => {
+                // no imperative, no translation word - the guard shapes are absent
+                expect(detectScriptureCommand("he gave them any be that they wanted", "en", withNasb)).toBeNull()
+            })
+
+            it("stays silent when two acronyms fit equally", () => {
+                const ambiguous = [...withNasb, { id: "nab-id", names: ["NAB"] }]
+                // "any be" is one dropped letter from NASB and exactly NAB - switching on a guess
+                // would put the wrong translation on a live stage, so nothing happens
+                expect(detectScriptureCommand("give me any be", "en", ambiguous)).toBeNull()
+            })
+        })
+
         it("detects verse_next: 'go to the next verse'", () => {
             expect(detect("go to the next verse")).toEqual({ type: "verse_next", phrase: "go to the next verse" })
         })
