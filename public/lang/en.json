@@ -1828,6 +1828,7 @@
         "engine_nemotron_hint": "Transcribes as you speak, so references and voice commands are picked up almost immediately. Covers around 40 languages, and nothing to install - just one model download.",
         "nemotron_not_downloaded": "The streaming model is not downloaded yet (about 680 MB)",
         "nemotron_outdated": "The streaming model on this computer is an older version - download it again to get the current one",
+        "fallback_whisper_outdated": "The streaming model needs to be downloaded again - listening with Whisper for now",
         "nemotron_unsupported": "The streaming engine is not available on this platform - use Whisper instead",
         "whisper_not_installed": "Whisper speech recognition is not installed",
         "check_again": "Check again",

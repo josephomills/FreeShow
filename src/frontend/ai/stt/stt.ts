@@ -2,6 +2,7 @@ import { get, writable } from "svelte/store"
 import { Main } from "../../../types/IPC/Main"
 import { requestMain, sendMain } from "../../IPC/main"
 import { ai } from "../../stores"
+import { newToast } from "../../utils/common"
 import audioProcessor from "./audioProcessor.ts?worker&url"
 
 export const audioLevelStore = writable<number>(0.0)
@@ -55,7 +56,14 @@ export class SpeechToText {
             if (!get(ai)?.stt?.engine && engine === "nemotron" && fallbackErrors.includes(result?.error || "")) {
                 console.info(`[AI STT] defaulted nemotron unavailable (${result?.error}) - falling back to whisper`)
                 const retry = await requestMain(Main.AI_LISTEN_START, { engine: "whisper", engineOptions: get(ai)?.stt?.engineOptions?.whisper || {} }, undefined, 60000)
-                if (retry?.started) return { ok: true }
+                if (retry?.started) {
+                    // a fresh install has simply not downloaded the model yet, and whisper is the
+                    // intended default there - but an OUTDATED model means an update changed what
+                    // this build ships against, and the operator must hear about the swap or they
+                    // will evaluate the wrong engine's output all evening without knowing
+                    if (result?.error === "nemotron_model_outdated") newToast("ai.fallback_whisper_outdated")
+                    return { ok: true }
+                }
                 return { ok: false, error: retry?.error || "start_failed" }
             }
 
