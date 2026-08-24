@@ -123,13 +123,13 @@ function main() {
         const echo = mine.map((r) => r.metrics.interimEchoes.length)
         const werCi = ci(wer)
 
-        return [variant, mine.length, mean(decode).toFixed(3) + "x", Math.round(mean(lagMean)), Math.round(Math.max(...lagMax)), wer.length ? (mean(wer) * 100).toFixed(1) + "%" : "-", werCi ? `${(werCi.low * 100).toFixed(1)}-${(werCi.high * 100).toFixed(1)}` : "n<2", echo.reduce((a, b) => a + b, 0)]
+        return [variant, mine.length, mean(decode).toFixed(3) + "x", wall.length ? mean(wall).toFixed(3) + "x" : "-", Math.round(mean(lagMean)), Math.round(Math.max(...lagMax)), wer.length ? (mean(wer) * 100).toFixed(1) + "%" : "-", werCi ? `${(werCi.low * 100).toFixed(1)}-${(werCi.high * 100).toFixed(1)}` : "n<2", echo.reduce((a, b) => a + b, 0)]
     })
 
     console.log(table(rows, ["variant", "n", "cpu", "wall", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]))
     console.log(`\ncpu  = CPU seconds per second of audio - the engine's real cost. Above 1.0 it cannot keep up.`)
-    console.log(`wall = the same thing measured in wall time, which on a busy desktop measures the desktop.`)
-    console.log(`       Compare engines on cpu; a large wall/cpu gap just means the machine was loaded.`)
+    console.log(`wall = the same thing in wall time. It runs LOWER than cpu because the decoder uses two`)
+    console.log(`       threads, so cpu sums across them - cpu is total work, wall is elapsed time.`)
     console.log(`lag  = ms a word is visible as interim before it is committed; detection only sees committed`)
     console.log(`       text. echo = a word visibly repeated on screen.`)
     console.log(`\nWER here is against a whisper large-v3 PSEUDO-reference on the sermon fixtures. It measures`)
