@@ -7,6 +7,7 @@
 // tab can never outrank a deliberate choice.
 
 import { get } from "svelte/store"
+import { spokenTranslationNames } from "./translationAliases"
 import type { AiScriptureBook, AiScriptureTranslation } from "../../../types/ai/AiScripture"
 import { Main } from "../../../types/IPC/Main"
 import { getShortBibleName, loadJsonBible } from "../../components/drawer/bible/scripture"
@@ -147,7 +148,7 @@ export function buildTranslationTable(bibleIds: string[]): AiScriptureTranslatio
         if (!bible) return
 
         const names: string[] = []
-        const candidates = [bible.name, bible.customName, getShortBibleName(bible.name)]
+        const candidates = [bible.name, bible.customName, getShortBibleName(bible.name), ...spokenTranslationNames(bible.name || ""), ...spokenTranslationNames(bible.customName || "")]
         candidates.forEach((name) => {
             const trimmed = (name || "").trim()
             if (trimmed && !names.some((a) => a.toLowerCase() === trimmed.toLowerCase())) names.push(trimmed)

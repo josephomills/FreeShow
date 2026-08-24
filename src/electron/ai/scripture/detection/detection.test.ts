@@ -8,7 +8,7 @@ vi.mock("../llmTalkScripture", () => ({
 
 import { normalizeSpokenNumbers } from "../../commands/spokenNumbers"
 import { DetectionCoordinator } from "./coordinator"
-import { detectExplicitReferences } from "./references"
+import { buildBookIndex, detectExplicitReferences, matchReferences } from "./references"
 
 const BOOKS = [
     { number: 19, canonNumber: 19, names: ["Psalms", "Psalm"] },
@@ -64,6 +64,56 @@ describe("normalizeSpokenNumbers", () => {
         expect(normalizeSpokenNumbers("1st John 4:7")).toBe("1 john 4:7")
         // ...but keeps the ordinal whole before chapter/verse ("the 1st chapter")
         expect(normalizeSpokenNumbers("the 1st chapter of John")).toBe("the 1st chapter of john")
+    })
+})
+
+// A translation named right after the reference ("one samuel ten and five, good news") - from a
+// live service where exactly that spoken form only produced a bare chapter 10, and the verse had
+// to wait for the quote matcher. The version name is deliberate-reference evidence: it unlocks
+// the bare "and N" verse reading, cues the match, and picks the projection bible.
+describe("spoken translation after a reference", () => {
+    const SAMUEL_BOOKS = [...BOOKS, { number: 9, canonNumber: 9, names: ["1 Samuel"] }]
+    const TRANSLATIONS = [
+        { id: "gnt-id", names: ["GNT", "Good News", "Good News Translation"] },
+        { id: "kjv-id", names: ["KJV", "King James", "King James Version"] }
+    ]
+    const match = (text: string) => matchReferences(normalizeSpokenNumbers(text), buildBookIndex(SAMUEL_BOOKS, TRANSLATIONS))
+
+    it("reads 'one samuel ten and five good news' as 1 Samuel 10:5 in the GNT", () => {
+        const refs = match("look at what the prophet samuel told saul one samuel ten and five good news you go to the hill of god")
+        expect(refs).toHaveLength(1)
+        expect(refs[0]).toMatchObject({ bookNumber: 9, chapter: 10, verseStart: 5, confidence: "high", spokenBibleId: "gnt-id", bareChapter: false })
+    })
+
+    it("survives one stray token before the version name", () => {
+        // the live transcript carried "...ten and five guy good news"
+        const refs = match("one samuel ten and five guy good news")
+        expect(refs[0]).toMatchObject({ chapter: 10, verseStart: 5, spokenBibleId: "gnt-id" })
+    })
+
+    it("does not hold a complete reference-with-version for confirmation", () => {
+        const refs = match("one samuel ten and five good news")
+        expect(refs[0].tailAnchored).toBe(false)
+    })
+
+    it("attaches the version to a colon reference too", () => {
+        const refs = match("john 3:16 king james")
+        expect(refs[0]).toMatchObject({ bookNumber: 43, chapter: 3, verseStart: 16, spokenBibleId: "kjv-id" })
+    })
+
+    it("still refuses the bare 'and N' reading with no imperative and no version", () => {
+        const refs = match("he was in acts 15 and 3 others were with him")
+        expect(refs.every((ref) => !(ref.bookNumber === 44 && ref.verseStart === 3))).toBe(true)
+    })
+
+    it("keeps the bare-chapter hold when only a chapter and version were spoken", () => {
+        const refs = match("romans 8 king james")
+        expect(refs[0]).toMatchObject({ chapter: 8, bareChapter: true, spokenBibleId: "kjv-id" })
+    })
+
+    it("finds no version when none is installed under that name", () => {
+        const refs = matchReferences(normalizeSpokenNumbers("john 3:16 good news"), buildBookIndex(SAMUEL_BOOKS, []))
+        expect(refs[0].spokenBibleId).toBeUndefined()
     })
 })
 

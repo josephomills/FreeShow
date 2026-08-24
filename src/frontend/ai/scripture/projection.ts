@@ -35,7 +35,10 @@ export async function projectDetection(detection: DetectedReference, manual?: bo
         scriptureState.lastAutoProjectedRef = detection
     }
 
-    const targetId = settings.displayTranslation === "matched" && detection.matchedBibleId ? detection.matchedBibleId : preferredTranslationId()
+    // a translation the speaker NAMED with the reference ("...ten and five, good news") outranks
+    // every display preference - they said which bible to put up, in so many words
+    const spokenId = detection.spokenBibleId && get(scriptures)[detection.spokenBibleId] ? detection.spokenBibleId : ""
+    const targetId = spokenId || (settings.displayTranslation === "matched" && detection.matchedBibleId ? detection.matchedBibleId : preferredTranslationId())
     if (!targetId) return false
     scriptureState.lastAutoProjectedBibleId = targetId
 

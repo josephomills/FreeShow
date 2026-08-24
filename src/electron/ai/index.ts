@@ -36,6 +36,7 @@ export function startScriptureDetection(config: AiScriptureDetectionConfig): boo
 
     const coordinator = new DetectionCoordinator({
         books: config.books,
+        translations: config.translations,
         llm,
         getApiKey: getAiKey,
         cooldownSeconds: config.refCooldownSeconds,

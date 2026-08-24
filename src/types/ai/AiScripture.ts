@@ -12,6 +12,7 @@ export interface DetectedReference {
     source: "regex" | "llm" | "local" // "local" = the renderer's quote matcher (no LLM involved)
     quote?: string // the transcript text that triggered the detection
     matchedBibleId?: string // set when quoted verse text matched a specific translation
+    spokenBibleId?: string // set when the speaker named the translation with the reference ("...ten and five, good news")
     continuation?: boolean // a recitation flowing into the next verse of the live passage (follow-along)
     corrects?: { bookNumber: number; chapter: number; verseStart: number; verseEnd: number } // this detection supersedes an earlier similar-passage match (later words narrowed the search)
     timestamp: number

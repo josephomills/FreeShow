@@ -2,7 +2,7 @@
 // tier 1: fast local regex detection of explicitly spoken references ("John chapter 3 verse 16")
 // tier 2: LLM detection over the rolling transcript for paraphrased/quoted references (optional, needs an API key)
 
-import type { AiScriptureBook, AiScriptureState, DetectedReference } from "../../../../types/ai/AiScripture"
+import type { AiScriptureBook, AiScriptureTranslation, AiScriptureState, DetectedReference } from "../../../../types/ai/AiScripture"
 import { normalizeSpokenNumbers } from "../../commands/spokenNumbers"
 import { LLM_API_TIMEOUT } from "../../llm/models/APIModel"
 import { getLLMScriptureProvider } from "../llmTalkScripture"
@@ -48,10 +48,13 @@ interface DetectionCandidate {
     confidence: "high" | "medium" | "low"
     type: "explicit" | "quoted"
     quote?: string
+    spokenBibleId?: string
 }
 
 interface DetectionCoordinatorOptions {
     books: AiScriptureBook[]
+    /** Installed translations, so a version named with the reference resolves to its bible. */
+    translations?: AiScriptureTranslation[]
     llm: { provider: string; model: string } | null
     getApiKey: (providerId: string) => string
     onDetection: (ref: DetectedReference) => void
@@ -116,7 +119,7 @@ export class DetectionCoordinator {
 
     constructor(opts: DetectionCoordinatorOptions) {
         this.opts = opts
-        this.bookIndex = buildBookIndex(opts.books)
+        this.bookIndex = buildBookIndex(opts.books, opts.translations)
         this.anchorBookPrefix = this.bookIndex.bookPattern ? new RegExp("(?:^|[^a-z0-9])(?:" + this.bookIndex.bookPattern + ")[,.]?\\s+$") : null
         this.cooldownMs = (opts.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS) * 1000
         this.holdProvisional = opts.holdProvisionalReferences !== false
@@ -134,7 +137,7 @@ export class DetectionCoordinator {
     /** The Search Bibles selection changed mid-session - the spoken book-name index follows it. */
     updateBooks(books: AiScriptureBook[]): void {
         this.opts.books = books
-        this.bookIndex = buildBookIndex(books)
+        this.bookIndex = buildBookIndex(books, this.opts.translations)
         this.anchorBookPrefix = this.bookIndex.bookPattern ? new RegExp("(?:^|[^a-z0-9])(?:" + this.bookIndex.bookPattern + ")[,.]?\\s+$") : null
     }
 
@@ -201,7 +204,7 @@ export class DetectionCoordinator {
             // speaker says anything else at all, including the pause that closes the utterance.
             if (this.holdProvisional && match.tailAnchored && !settled) return
 
-            const candidate: DetectionCandidate = { book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote }
+            const candidate: DetectionCandidate = { book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote, spokenBibleId: match.spokenBibleId }
 
             // A chapter with no spoken verse waits to learn whether one follows - see
             // BARE_CHAPTER_HOLD_MS. Verse 1 is this reference's default, not the speaker's word.
@@ -397,6 +400,7 @@ export class DetectionCoordinator {
                 type: candidate.type,
                 source,
                 quote: candidate.quote,
+                spokenBibleId: candidate.spokenBibleId,
                 timestamp: now
             })
         }

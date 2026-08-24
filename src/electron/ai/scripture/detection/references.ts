@@ -1,4 +1,4 @@
-import type { AiScriptureBook } from "../../../../types/ai/AiScripture"
+import type { AiScriptureBook, AiScriptureTranslation } from "../../../../types/ai/AiScripture"
 import { HOMOPHONE_ALT, normalizeSpokenNumbers, parseNumberToken } from "../../commands/spokenNumbers"
 import { maxVerseInChapter } from "../chapterVerseCounts"
 import { VERSE_WORD } from "../vocabulary"
@@ -17,6 +17,10 @@ export interface BookIndex {
     bookPattern: string // alternation of all book name patterns ("" when no books)
     bookWords: string[] // distinct book-name words long enough for mishearing recovery
     allBookWords: string[] // distinct book-name words >= 4 chars, for the stutter collapse
+    // a translation name spoken right after a reference ("one samuel ten and five, good news"):
+    // anchored tail regex over the installed translations' spoken names, and name -> bible id
+    translationTailRegex: RegExp | null
+    translationByToken: Map<string, string>
 }
 
 // a spoken "8 18" often reaches us as "818". Recover the pair when the number cannot be a chapter of this book,
@@ -42,7 +46,7 @@ function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-export function buildBookIndex(books: AiScriptureBook[]): BookIndex {
+export function buildBookIndex(books: AiScriptureBook[], translations: AiScriptureTranslation[] = []): BookIndex {
     const byToken = new Map<string, { name: string; number: number; chapterCount: number; requireVerse?: boolean }>()
     const tokens: string[] = []
 
@@ -133,7 +137,21 @@ export function buildBookIndex(books: AiScriptureBook[]): BookIndex {
     const allBookWords = new Set<string>()
     for (const token of tokens) for (const word of token.split(" ")) if (word.length >= 4) allBookWords.add(word)
 
-    return { regex, chapterFirstRegex, verseFirstRegex, psalmOrdinalRegex, singleChapterVerseRegex, byToken, bookPattern: patterns.join("|"), bookWords: Array.from(bookWords), allBookWords: Array.from(allBookWords) }
+    // Longest name first, so "new king james" can never resolve as "king james". One optional
+    // filler word may sit between the numbers and the name ("...and five, guys, Good News") -
+    // engines drop and invent small words constantly, and a version name following a reference
+    // is already so specific that one stray token does not make it narration.
+    const translationByToken = new Map<string, string>()
+    for (const translation of translations) {
+        for (const name of translation.names || []) {
+            const token = name.trim().toLowerCase().replace(/\s+/g, " ")
+            if (token && !translationByToken.has(token)) translationByToken.set(token, translation.id)
+        }
+    }
+    const translationNames = [...translationByToken.keys()].sort((a, b) => b.length - a.length).map((token) => escapeRegex(token).replace(/ /g, "\\s+"))
+    const translationTailRegex = translationNames.length ? new RegExp("^\\s*[,.]?\\s*(?:in\\s+|from\\s+)?(?:the\\s+)?(?:[a-z']+\\s+)?(?<name>" + translationNames.join("|") + ")\\b") : null
+
+    return { regex, chapterFirstRegex, verseFirstRegex, psalmOrdinalRegex, singleChapterVerseRegex, byToken, bookPattern: patterns.join("|"), bookWords: Array.from(bookWords), allBookWords: Array.from(allBookWords), translationTailRegex, translationByToken }
 }
 
 interface ReferenceMatch {
@@ -156,6 +174,8 @@ interface ReferenceMatch {
      * NORMALIZED text, which only this function has.
      */
     tailAnchored: boolean
+    /** A translation named right after the reference ("...ten and five, good news") - its bible id. */
+    spokenBibleId?: string
 }
 
 // named groups shared by every reference regex: book, cA/cB/cC (chapter routes),
@@ -199,7 +219,14 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         if (!(chapter >= 1) && options.verseOverride !== undefined && book.chapterCount === 1) chapter = 1
         if (!(chapter >= 1)) return
 
-        const verseRaw = options.verseOverride ?? groups.v1 ?? groups.v2 ?? groups.v3 ?? groups.v4 ?? (groups.imp !== undefined ? groups.v5 : undefined)
+        // a translation named right after the numbers ("...ten and five, good news") is deliberate
+        // reference intent: it cues the match, unlocks the bare "and N" verse reading exactly like
+        // a spoken imperative does, and picks the translation the projection should use
+        const matchEndOffset = match.index + match[0].length
+        const translationTail = index.translationTailRegex?.exec(normalized.slice(matchEndOffset))
+        const spokenBibleId = translationTail ? index.translationByToken.get((translationTail.groups?.name || "").replace(/\s+/g, " ")) : undefined
+
+        const verseRaw = options.verseOverride ?? groups.v1 ?? groups.v2 ?? groups.v3 ?? groups.v4 ?? (groups.imp !== undefined || spokenBibleId !== undefined ? groups.v5 : undefined)
         const hasVerse = verseRaw !== undefined
         let verseStart = 1
         let verseEnd = 1
@@ -251,15 +278,20 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         // book prefix ("first john"/"1 john") or a digit:digit shape ("3:16"). normalizeSpokenNumbers() never introduces any
         // of these words (its digit ordinals land only where the shape already carried the cue), so checking the
         // normalized snippet reflects the original text.
-        const hasCue = options.alwaysCued || /\bchapter\b|\bverses?\b/.test(quote) || /\d:\d/.test(quote) || /^[1-3]\b/.test(bookToken)
+        const hasCue = options.alwaysCued || spokenBibleId !== undefined || /\bchapter\b|\bverses?\b/.test(quote) || /\d:\d/.test(quote) || /^[1-3]\b/.test(bookToken)
 
         // book + chapter + verse ("matthew 12 4"), the same pair run together ("deuteronomy 818") or a cued
         // chapter ("turn to matthew chapter 5") is deliberate spoken intent - "high" so auto mode projects it.
         // only a bare "bookname 15" ("he acts 15 years old") stays "medium" and waits for confirmation
         const confidence: "high" | "medium" | "low" = hasVerse || unglued || hasCue ? "high" : "medium"
 
+        // a named translation terminates the reference - with the verse spoken there is nothing
+        // left to wait for, so the provisional hold must not delay a complete reference
+        const fullyTerminated = spokenBibleId !== undefined && (hasVerse || unglued)
+        const spokenQuote = translationTail ? quote + translationTail[0].replace(/\s+/g, " ").replace(/\s+$/, "") : quote
+
         const matchEnd = match.index + match[0].length
-        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote, bareChapter: !hasVerse && !unglued, tailAnchored: !normalized.slice(matchEnd).trim() })
+        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote: spokenQuote, bareChapter: !hasVerse && !unglued, tailAnchored: !fullyTerminated && !normalized.slice(matchEnd).trim(), spokenBibleId })
         if (options.claimSpan) claimedSpans.push({ from: match.index, to: match.index + match[0].length })
     }
 
