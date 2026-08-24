@@ -7,6 +7,7 @@ import type { BibleInstance } from "../../components/drawer/bible/scripture"
 import { loadJsonBible, outputIsScripture } from "../../components/drawer/bible/scripture"
 import { setDrawerTabData } from "../../components/helpers/historyHelpers"
 import { activeScripture, aiScriptureAutoPaused, aiScriptureSuggestions, drawerTabsData, outLocked, scriptureHistory, scriptures } from "../../stores"
+import { getBookExact, getChapterExact, hasBookNumber } from "./bibleLookup"
 import { parseNumber, projectDetection, projectResolved, restorePrevious } from "./projection"
 import { getSettings, scriptureState } from "./scriptureState"
 import { cycleRank, favoriteTranslationIds, preferredTranslationId } from "./translationPreference"
@@ -156,7 +157,9 @@ async function switchTranslation(cmd: Extract<AiScriptureCommandEvent, { type: "
     // map the current book to the target bible: same number when both use the 66 book canon, name match otherwise
     let targetBook: number | string = from.book
     const targetBooks = targetBible.data.books || []
-    if ((from.bible.data.books || []).length !== 66 || targetBooks.length !== 66) {
+    // the canon shortcut only holds when both bibles really carry the number - an unverified one
+    // resolves to books[0] downstream and switches translation AND book in one go (bibleLookup.ts)
+    if ((from.bible.data.books || []).length !== 66 || targetBooks.length !== 66 || !hasBookNumber(targetBooks, from.book)) {
         const nameLower = from.bookName.toLowerCase()
         const match = targetBooks.find((a) => a.name?.toLowerCase() === nameLower || a.abbreviation?.toLowerCase() === nameLower || a.id?.toLowerCase() === nameLower)
         if (match) targetBook = match.number
@@ -168,11 +171,21 @@ async function switchTranslation(cmd: Extract<AiScriptureCommandEvent, { type: "
     }
 
     // clamp the current chapter & verses to what exists in the target translation
-    const TargetBook = await targetBible.getBook(targetBook)
+    const TargetBook = await getBookExact(targetBible, targetBook)
+    if (!TargetBook) {
+        console.warn(`[AiScripture] "${from.bookName}" is not in "${targetParseId}" - staying on the current translation instead of switching to the wrong book`)
+        return
+    }
+
     const targetChapterCount = TargetBook.data.chapters?.length || 0
     const targetChapter = targetChapterCount ? Math.min(Math.max(1, from.chapter), targetChapterCount) : from.chapter
 
-    const TargetChapter = await TargetBook.getChapter(targetChapter)
+    const TargetChapter = await getChapterExact(TargetBook, targetChapter)
+    if (!TargetChapter) {
+        console.warn(`[AiScripture] ${from.bookName} ${targetChapter} is not in "${targetParseId}" - staying on the current translation`)
+        return
+    }
+
     const targetChapterVerses = TargetChapter.data.verses || []
     const maxVerse = targetChapterVerses.length ? (targetChapterVerses[targetChapterVerses.length - 1]?.number ?? targetChapterVerses.length) : 0
     const verses = [...new Set(from.verses.map((a) => (maxVerse ? Math.min(Math.max(1, a), maxVerse) : a)))].sort((a, b) => a - b)

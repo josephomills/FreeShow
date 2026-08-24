@@ -14,6 +14,7 @@ import { getFirstActiveOutput, setOutput } from "../../components/helpers/output
 import { clearSlide } from "../../components/output/clear"
 import { sendMain } from "../../IPC/main"
 import { activeDrawerTab, activeScripture, aiScriptureHasProjected, drawerTabsData, openScripture, outLocked, scriptures, scripturesCache } from "../../stores"
+import { getBookExact, getChapterExact, hasBookNumber } from "./bibleLookup"
 import { setQuoteMatchAnchor } from "./quoteMatch/quoteMatchSession"
 import { getSettings, scriptureState } from "./scriptureState"
 import { preferredTranslationId } from "./translationPreference"
@@ -60,14 +61,28 @@ export async function projectDetection(detection: DetectedReference, manual?: bo
 
         // clamp chapter/verses to what actually exists in the target translation
         try {
-            const Book = await bible.getBook(book)
+            // a missing book comes back as books[0] rather than an error - see bibleLookup.ts
+            const Book = await getBookExact(bible, book)
+            if (!Book) {
+                console.warn(`[AiScripture] "${detection.book}" (book ${book}) is not in "${parseId}" - skipping the projection instead of showing whichever book that bible starts with`)
+                return false
+            }
+
             const chapterCount = Book.data.chapters?.length || 0
             if (chapterCount) chapter = Math.min(Math.max(1, chapter), chapterCount)
             // a clamp here means the target bible disagrees about the book's structure - the
             // projected label would no longer match the detected reference, so say it loudly
             if (chapter !== detection.chapter) console.warn(`[AiScripture] ${detection.book} ${detection.chapter} clamped to chapter ${chapter} in "${parseId}" (${chapterCount} chapters found) - the projected label will not match the detection`)
 
-            const Chapter = await Book.getChapter(chapter)
+            // the clamp above only runs when the book reports a chapter count, so a chapter can
+            // still be absent here - and a missing one comes back as chapter 1 under the
+            // requested chapter's number, which reads as a correct projection everywhere
+            const Chapter = await getChapterExact(Book, chapter)
+            if (!Chapter) {
+                console.warn(`[AiScripture] ${detection.book} ${chapter} is not in "${parseId}" - skipping the projection instead of showing chapter 1 under a "${chapter}" label`)
+                return false
+            }
+
             const chapterVerses = Chapter.data.verses || []
             const maxVerse = chapterVerses.length ? (chapterVerses[chapterVerses.length - 1]?.number ?? chapterVerses.length) : 0
             if (maxVerse) {
@@ -140,7 +155,10 @@ async function sendAnchorContext(targetId: string, book: number | string, chapte
         const bible = await loadJsonBible(parseId)
         if (!bible) return
 
-        const Book = await bible.getBook(book)
+        // an unresolvable book would otherwise anchor the session on books[0], and every later
+        // bare "verse N" would resolve against the wrong passage
+        const Book = await getBookExact(bible, book)
+        if (!Book) return
         const name = Book.data.name || String(book)
         // 66 book bibles use the standard Protestant canon numbering, so the local number doubles as the canon number
         const bookNumber = Number(Book.data.number ?? book)
@@ -158,10 +176,14 @@ async function sendAnchorContext(targetId: string, book: number | string, chapte
 export function resolveBookNumber(bible: BibleInstance, ref: DetectedReference): number {
     const books = bible.data.books || []
 
-    // 66 book bibles use the standard Protestant canon numbering, and with no book list at all
-    // the canon number is the only sensible read
-    if (books.length === 66) return ref.bookNumber
+    // with no book list at all the canon number is the only sensible read
     if (!books.length) return ref.bookNumber
+
+    // 66 book bibles use the standard Protestant canon numbering - but only trust that when the
+    // number is really there. Nothing downstream can catch a bad one on its own (json-bible
+    // answers a missing book with books[0]), and falling through to the name match below can
+    // still resolve a 66 book bible that simply numbers its books differently
+    if (books.length === 66 && hasBookNumber(books, ref.bookNumber)) return ref.bookNumber
 
     const nameLower = (ref.book || "").toLowerCase()
     const match = books.find((a) => a.name?.toLowerCase() === nameLower || a.abbreviation?.toLowerCase() === nameLower || a.id?.toLowerCase() === nameLower)
