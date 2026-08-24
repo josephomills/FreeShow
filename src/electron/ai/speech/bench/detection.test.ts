@@ -269,11 +269,11 @@ describe("bench/detection end to end", () => {
         expect(score.recall).toBe(1)
         expect(score.matched).toBe(1)
         expect(score.latencyMs.max).toBe(500)
-        // the first segment ends at the chapter, and the coordinator emits Ephesians 2:1 for it. The
-        // manifest never asked for that verse, so it is a false positive - which is the honest score:
-        // the operator really would see the wrong verse offered 1.6 s before the right one.
-        expect(score.falsePositives).toBe(1)
-        expect(score.spurious[0].reference).toMatchObject({ chapter: 2, verseStart: 1 })
+        // The first segment ends at the chapter, and this test used to assert the operator saw
+        // Ephesians 2:1 offered 1.6 s before the right verse - it recorded the defect. A chapter
+        // with no spoken verse now waits to learn whether one follows, so only 2:8 is ever shown.
+        expect(score.falsePositives).toBe(0)
+        expect(score.spurious).toEqual([])
     })
 })
 
