@@ -5,6 +5,9 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { describe, expect, it } from "vitest"
+import type { DetectedReference } from "../../../../types/ai/AiScripture"
+import { scoreDetection, type DetectionEmission, type DetectionScore } from "./detection"
+import type { ExpectedReference } from "./fixtures"
 import type { RunMetrics } from "./metrics"
 import type { PaceMode } from "./pacer"
 import { assertComparable, buildReport, checkComparable, formatCi, formatMs, formatPercent, formatRatio, renderConsoleReport, renderMarkdownDiff, renderTable, resolveReportDir, summarizeByVariant, summarizeVariant, writeReport, type RunRecord } from "./report"
@@ -27,15 +30,45 @@ interface Sample {
     decodeCost?: number
     startupMs?: number
     errors?: string[]
+    detection?: DetectionSample
+}
+
+interface DetectionSample {
+    /** References the manifest lists. 0 is the common case - most clips ask for no verse at all. */
+    expected?: number
+    /** How many of them the replay found. Defaults to all of them. */
+    found?: number
+    /** Detections of a passage nobody listed. */
+    falsePositives?: number
+    latencyMs?: number
+}
+
+/**
+ * Scored by the real scoreDetection rather than assembled by hand, so a test can never assert a
+ * combination of counts that detection.ts would not produce.
+ */
+function makeDetection(sample: DetectionSample, fixtureId: string, variantId: string, audioDurationMs: number): DetectionScore {
+    // one verse per reference, so a detection can only ever be credited to the mention it belongs to
+    const expected: ExpectedReference[] = Array.from({ length: sample.expected ?? 0 }, (_, index) => ({ book: 40, chapter: 6, verseStart: 33 + index, phrase: `matthew six ${33 + index}`, phraseEndMs: 5000 * (index + 1) }))
+    const latencyMs = sample.latencyMs ?? 1200
+    const detected = (bookNumber: number, chapter: number, verseStart: number) => ({ bookNumber, chapter, verseStart, verseEnd: verseStart }) as DetectedReference
+
+    const detections: DetectionEmission[] = expected.slice(0, sample.found ?? expected.length).map((reference) => ({ audioMs: reference.phraseEndMs + latencyMs, reference: detected(reference.book, reference.chapter, reference.verseStart) }))
+    // Genesis 1:N - a book no sample lists, so these are spurious rather than repeats
+    for (let index = 0; index < (sample.falsePositives ?? 0); index++) detections.push({ audioMs: 1000 * (index + 1), reference: detected(1, 1, index + 1) })
+
+    return scoreDetection({ fixtureId, variantId, audioDurationMs, segmentsFed: detections.length, detections, statuses: [] }, expected)
 }
 
 function makeRecord(sample: Sample = {}): RunRecord {
     const audioDurationMs = sample.audioDurationMs ?? 60000
     const lag = sample.lag ?? [100, 200, 300]
+    const fixtureId = sample.fixtureId ?? "fixture-a"
+    const variantId = sample.variantId ?? "batch"
 
     const metrics: RunMetrics = {
-        fixtureId: sample.fixtureId ?? "fixture-a",
-        variantId: sample.variantId ?? "batch",
+        fixtureId,
+        variantId,
         audioDurationMs,
         commitLag: { lag: describeDistribution(lag), neverInterim: 0, words: lag.length },
         interimEchoes: Array.from({ length: sample.echoes ?? 0 }, (_, index) => ({ audioMs: index * 1000, text: "echo" })),
@@ -60,13 +93,14 @@ function makeRecord(sample: Sample = {}): RunRecord {
     return {
         fixtureSetId: "smoke",
         fixtureSetHash: sample.hash ?? "aaaabbbbcccc",
-        fixtureId: sample.fixtureId ?? "fixture-a",
-        variantId: sample.variantId ?? "batch",
+        fixtureId,
+        variantId,
         mode: sample.mode ?? "max",
         platform: sample.platform ?? "darwin",
         arch: sample.arch ?? "arm64",
         timestampMs: 1700000000000,
         ...(sample.resampledFrom ? { resampledFrom: sample.resampledFrom } : {}),
+        ...(sample.detection ? { detection: makeDetection(sample.detection, fixtureId, variantId, audioDurationMs) } : {}),
         metrics
     }
 }
@@ -321,6 +355,16 @@ describe("bench/report file", () => {
         expect(report.records[0].metrics.wer.wer).toBe(0.1)
     })
 
+    it("keeps the detection score, including what was missed and what was spurious", () => {
+        const file = writeReport([makeRecord({ detection: { expected: 2, found: 1, falsePositives: 1, latencyMs: 1200 } })], outDir())
+        const report = JSON.parse(fs.readFileSync(file, "utf8"))
+
+        expect(report.records[0].detection.recall).toBe(0.5)
+        expect(report.records[0].detection.matches[0].latencyMs).toBe(1200)
+        expect(report.records[0].detection.missed).toHaveLength(1)
+        expect(report.records[0].detection.spurious).toHaveLength(1)
+    })
+
     it("refuses to write an empty report", () => {
         expect(() => writeReport([], outDir())).toThrow(/no records/)
         expect(renderConsoleReport([])).toContain("no records")
@@ -387,5 +431,123 @@ describe("writeReport file naming", () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "freeshow-report-"))
         const file = writeReport([record("a"), record("b")], dir)
         expect(path.basename(file)).toBe("s-max-1970-01-01T00-00-01Z.json")
+    })
+})
+
+describe("bench/report detection", () => {
+    /** The shape of the real set: one sermon that lists references, one clip that lists none. */
+    function detectionRecords(): RunRecord[] {
+        return [makeRecord({ variantId: "batch", fixtureId: "sermon", wer: 0.1, detection: { expected: 3, found: 3, latencyMs: 900 } }), makeRecord({ variantId: "batch", fixtureId: "worship", wer: 0.2, detection: { expected: 0 } }), makeRecord({ variantId: "stream", fixtureId: "sermon", wer: 0.1, detection: { expected: 3, found: 2, falsePositives: 1, latencyMs: 2400 } }), makeRecord({ variantId: "stream", fixtureId: "worship", wer: 0.2, detection: { expected: 0, falsePositives: 2 } })]
+    }
+
+    it("pools recall over references, not over fixtures", () => {
+        // three found out of four asked for is 75%; averaging 100% and 0% per fixture would say 50%
+        // and let a one-reference clip outvote a three-reference sermon
+        const summary = summarizeByVariant([makeRecord({ fixtureId: "a", detection: { expected: 3, found: 3 } }), makeRecord({ fixtureId: "b", detection: { expected: 1, found: 0 } })])[0]
+
+        expect(summary.detection?.expectedReferences).toBe(4)
+        expect(summary.detection?.matched).toBe(3)
+        expect(summary.detection?.recall?.value).toBe(0.75)
+        expect(summary.detection?.recall?.n).toBe(4) // references, not runs
+        expect(summary.detection?.referenceRuns).toBe(2)
+    })
+
+    it("has no recall at all for a fixture that lists no reference, rather than zero", () => {
+        const summary = summarizeByVariant([makeRecord({ audioDurationMs: 30000, detection: { expected: 0, falsePositives: 2 } })])[0]
+
+        expect(summary.detection?.recall).toBeUndefined()
+        expect(summary.detection?.expectedReferences).toBe(0)
+        expect(summary.detection?.referenceRuns).toBe(0)
+        expect(summary.detection?.precision?.value).toBe(0)
+        expect(summary.detection?.falsePositivesPerMinute.value).toBe(4)
+    })
+
+    it("keeps a reference-free fixture out of recall but inside the false-positive rate", () => {
+        const summary = summarizeByVariant([makeRecord({ fixtureId: "a", detection: { expected: 2, found: 2 } }), makeRecord({ fixtureId: "b", detection: { expected: 0, falsePositives: 1 } })])[0]
+
+        expect(summary.detection?.recall?.value).toBe(1)
+        expect(summary.detection?.recall?.n).toBe(2)
+        expect(summary.detection?.referenceRuns).toBe(1)
+        expect(summary.detection?.falsePositivesPerMinute.value).toBe(0.5) // 0/min and 1/min, over a minute each
+    })
+
+    it("pools the latency percentiles from every match, not from per-run percentiles", () => {
+        const summary = summarizeByVariant([makeRecord({ fixtureId: "a", detection: { expected: 1, found: 1, latencyMs: 400 } }), makeRecord({ fixtureId: "b", detection: { expected: 1, found: 1, latencyMs: 3000 } })])[0]
+
+        expect(summary.detection?.latencyMs.n).toBe(2)
+        expect(summary.detection?.latencyMs.p50).toBe(400)
+        expect(summary.detection?.latencyMs.max).toBe(3000)
+    })
+
+    it("prints recall, precision, false positives and latency in the console table", () => {
+        const table = renderConsoleReport([makeRecord({ wer: 0.1, detection: { expected: 2, found: 1, falsePositives: 1, latencyMs: 1200 } })])
+        const row = table.split("\n").find((line) => line.trimStart().startsWith("batch "))!
+
+        expect(table).toContain("recall CI")
+        expect(table).toContain("det50")
+        expect(table).toContain("| 2 expected ref(s) ===")
+        expect(row).toContain("50.0%") // one of two found, and one of two detections spurious
+        expect(row).toContain("1200")
+    })
+
+    it('prints "-" where nothing was asked for, and 0.0% where something was asked for and missed', () => {
+        const row = (record: RunRecord) =>
+            renderConsoleReport([record])
+                .split("\n")
+                .find((line) => line.trimStart().startsWith("batch "))!
+
+        // nothing was asked for: a 0% here would read as the feature failing at something
+        expect(row(makeRecord({ detection: { expected: 0 } }))).not.toContain("%")
+        expect(row(makeRecord({ detection: { expected: 2, found: 0 } }))).toContain("0.0%")
+    })
+
+    it("gives the detection columns the room the echo columns had, and only when there is detection", () => {
+        expect(renderConsoleReport([makeRecord({ wer: 0.1 })])).toContain("echo CI")
+        expect(renderConsoleReport([makeRecord({ wer: 0.1 })])).not.toContain("recall")
+
+        const withDetection = renderConsoleReport([makeRecord({ wer: 0.1, detection: { expected: 1, found: 1 } })])
+        expect(withDetection).toContain("recall CI")
+        expect(withDetection).not.toContain("echo")
+    })
+
+    it("stays inside 120 columns with the detection columns and realistic variant ids", () => {
+        const records = ["nemotron-batch-en", "nemotron-stream-en", "nemotron-stream-en-ctc"].flatMap((variantId) => [0, 1].map((index) => makeRecord({ variantId, fixtureId: `fixture-${index}`, wer: 0.12, detection: { expected: 3, found: 2 + index, falsePositives: 1, latencyMs: 1200 + index * 300 } })))
+
+        for (const line of renderConsoleReport(records).split("\n")) expect(line.length).toBeLessThanOrEqual(120)
+    })
+
+    it("leads the markdown diff with the product metric and labels its direction", () => {
+        const markdown = renderMarkdownDiff(detectionRecords(), "batch")
+        const row = (label: string) => markdown.split("\n").find((line) => line.startsWith(`| ${label} |`))!
+
+        expect(markdown.indexOf("| detection recall |")).toBeLessThan(markdown.indexOf("| WER |"))
+        expect(row("detection recall")).toContain("higher")
+        expect(row("detection recall")).toContain("-33.3 pp **worse**")
+        expect(row("detection precision")).toContain("-60.0 pp **worse**") // 2 of 5 detections were asked for
+        expect(row("false positives / min")).toContain("+1.50 **worse**")
+        expect(row("detection latency p50 (ms)")).toContain("+1500 **worse**")
+    })
+
+    it("names how many references recall was pooled over, and over how many runs", () => {
+        expect(renderMarkdownDiff(detectionRecords(), "batch")).toContain("recall is over 3 expected reference(s) in 1 of 2 run(s)")
+    })
+
+    it("says there is no recall to report when no fixture listed a reference", () => {
+        const records = [makeRecord({ variantId: "batch", detection: { expected: 0 } }), makeRecord({ variantId: "stream", detection: { expected: 0, falsePositives: 1 } })]
+        const markdown = renderMarkdownDiff(records, "batch")
+
+        expect(markdown).toContain("no recall to report")
+        expect(markdown).not.toContain("| detection recall |")
+        expect(markdown).toContain("| false positives / min |")
+    })
+
+    it("does not report a latency for a variant that matched nothing", () => {
+        // describeDistribution of no samples is all zeros, and printing 0 ms would read as instant
+        const records = [makeRecord({ variantId: "batch", detection: { expected: 2, found: 0 } }), makeRecord({ variantId: "stream", detection: { expected: 2, found: 1, latencyMs: 800 } })]
+        const row = renderMarkdownDiff(records, "batch")
+            .split("\n")
+            .find((line) => line.startsWith("| detection latency p50 (ms) |"))!
+
+        expect(row).toBe("| detection latency p50 (ms) | lower | - | 800 | - |")
     })
 })

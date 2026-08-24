@@ -164,8 +164,9 @@ export interface DetectionRates {
     /** Absent when nothing at all was detected. n counts the detections that were judged. */
     precision?: RateSummary
     /**
-     * Per run, and the reference-free runs are in it deliberately - a clip nobody asked a verse
-     * from is the only honest measure of how often the feature interrupts a service.
+     * The mean of each run's own rate, weighting every fixture equally - as echoesPerMinute does,
+     * and the two are read side by side. The reference-free runs are in it deliberately: a clip
+     * nobody asked a verse from is the only honest measure of how often the feature interrupts.
      */
     falsePositivesPerMinute: RateSummary
     /** Pooled from every match's own latency, so these percentiles are exact rather than medians. */

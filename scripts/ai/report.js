@@ -11,6 +11,10 @@
 // fixture the others have is dropped from the pooled view and reported, because an incomplete row
 // would flatter or punish it for free.
 //
+// Recall gets the same treatment as WER: it is pooled only over the fixtures whose manifest lists
+// a reference, and the count of those fixtures is printed. Most clips list none - they still count
+// toward false positives per minute, which is the only detection number they can honestly produce.
+//
 //   node scripts/ai/report.js [--dir test-output/ai-bench] [--stamp <ms>]
 
 const fs = require("fs")
@@ -29,6 +33,13 @@ function parseArgs(argv) {
 const MIN_WPM = 60
 
 const mean = (values) => (values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : NaN)
+
+/** Same rule as stats.ts, so a pooled percentile here and a per-run one there mean the same thing. */
+function percentile(values, p) {
+    if (!values.length) return NaN
+    const sorted = [...values].sort((a, b) => a - b)
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))]
+}
 
 /** Deterministic bootstrap CI - the same inputs must render the same interval every time. */
 function ci(values, seed = 0x5eed) {
@@ -111,6 +122,16 @@ function main() {
 
     console.log(`WER pooled over ${scored.length} fixture(s) with a reference transcript`)
     if (sparse.length) console.log(`excluded from WER, under ${MIN_WPM} words/min so probably not speech: ${sparse.join(", ")}`)
+
+    // Recall's denominator. A fixture whose manifest lists nothing is not a fixture the feature
+    // failed on, so it is kept out of recall entirely - but its audio still counts against false
+    // positives per minute, which is the only detection number reference-free audio can produce.
+    const withDetection = records.some((r) => r.detection)
+    const referenced = covered.filter((key) => records.some((r) => `${r.fixtureSetId}/${r.fixtureId}` === key && r.detection && r.detection.expectedCount > 0))
+    if (withDetection) {
+        const named = `${referenced.slice(0, 4).join(", ")}${referenced.length > 4 ? " ..." : ""}`
+        console.log(referenced.length ? `detection recall pooled over ${referenced.length} of ${covered.length} fixture(s) that list a reference: ${named}` : `no fixture lists an expected reference - recall prints "-" and only fp/min says anything`)
+    }
     console.log()
 
     const rows = variants.map((variant) => {
@@ -123,15 +144,45 @@ function main() {
         const echo = mine.map((r) => r.metrics.interimEchoes.length)
         const werCi = ci(wer)
 
-        return [variant, mine.length, mean(decode).toFixed(3) + "x", wall.length ? mean(wall).toFixed(3) + "x" : "-", Math.round(mean(lagMean)), Math.round(Math.max(...lagMax)), wer.length ? (mean(wer) * 100).toFixed(1) + "%" : "-", werCi ? `${(werCi.low * 100).toFixed(1)}-${(werCi.high * 100).toFixed(1)}` : "n<2", echo.reduce((a, b) => a + b, 0)]
+        const head = [variant, mine.length, mean(decode).toFixed(3) + "x", wall.length ? mean(wall).toFixed(3) + "x" : "-", Math.round(mean(lagMean))]
+        const middle = [wer.length ? (mean(wer) * 100).toFixed(1) + "%" : "-", werCi ? `${(werCi.low * 100).toFixed(1)}-${(werCi.high * 100).toFixed(1)}` : "n<2"]
+        if (!withDetection) return [...head, Math.round(Math.max(...lagMax)), ...middle, echo.reduce((a, b) => a + b, 0)]
+
+        const detections = mine.map((r) => r.detection).filter(Boolean)
+        const expected = detections.reduce((total, d) => total + d.expectedCount, 0)
+        const matched = detections.reduce((total, d) => total + d.matched, 0)
+        const falsePositives = detections.reduce((total, d) => total + d.falsePositives, 0)
+        const judged = matched + falsePositives
+        // one sample per expected reference, so the interval is drawn from the same weighting the
+        // pooled recall uses - a fixture with six mentions counts for six, not for one
+        const recallCi = ci(Array.from({ length: expected }, (_, i) => (i < matched ? 1 : 0)))
+        // exact percentiles: every match carries its own latency into the JSON, so nothing is
+        // being re-derived from per-run percentiles that could not be pooled
+        const latencies = detections.flatMap((d) => d.matches.map((m) => m.latencyMs))
+        const fpPerMinute = mean(detections.map((d) => (d.audioDurationMs ? d.falsePositives / (d.audioDurationMs / 60000) : 0)))
+        const ms = (value) => (Number.isFinite(value) ? Math.round(value) : "-")
+
+        return [...head, ...middle, expected ? ((matched / expected) * 100).toFixed(1) + "%" : "-", expected ? (recallCi ? `${(recallCi.low * 100).toFixed(1)}-${(recallCi.high * 100).toFixed(1)}` : "n<2") : "-", judged ? ((matched / judged) * 100).toFixed(1) + "%" : "-", fpPerMinute.toFixed(2), ms(percentile(latencies, 50)), ms(percentile(latencies, 95))]
     })
 
-    console.log(table(rows, ["variant", "n", "cpu", "wall", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]))
+    const headers = withDetection ? ["variant", "n", "cpu", "wall", "lag mean", "WER", "WER 95% CI", "recall", "recall CI", "prec", "fp/min", "det50", "det95"] : ["variant", "n", "cpu", "wall", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]
+
+    console.log(table(rows, headers))
     console.log(`\ncpu  = CPU seconds per second of audio - the engine's real cost. Above 1.0 it cannot keep up.`)
     console.log(`wall = the same thing in wall time. It runs LOWER than cpu because the decoder uses two`)
     console.log(`       threads, so cpu sums across them - cpu is total work, wall is elapsed time.`)
     console.log(`lag  = ms a word is visible as interim before it is committed; detection only sees committed`)
-    console.log(`       text. echo = a word visibly repeated on screen.`)
+    console.log(`       text.`)
+    if (!withDetection) {
+        console.log(`echo = a word visibly repeated on screen.`)
+    } else {
+        console.log(`\nrecall = spoken references the feature found, pooled over references rather than over`)
+        console.log(`       fixtures, so its n is references. "-" means the fixture asked for none - not 0%.`)
+        console.log(`prec / fp/min = of the references it offered, how many were asked for, and how often it`)
+        console.log(`       interrupts per minute of audio. fp/min counts EVERY fixture, reference-free ones`)
+        console.log(`       included - those clips are the only honest measure of unprompted interruption.`)
+        console.log(`det50/det95 = ms from the spoken phrase ending to the reference being actionable.`)
+    }
     console.log(`\nWER here is against a whisper large-v3 PSEUDO-reference on the sermon fixtures. It measures`)
     console.log(`agreement with whisper, not truth, and is only meaningful for ranking these variants`)
     console.log(`against each other. Overlapping CIs mean the difference is not resolved at this n.`)

@@ -27,6 +27,14 @@ export type FixtureTier =
 
 export type TimingSource = "generated" | "hand-marked" | "none"
 
+/**
+ * One entry per reference that SHOULD REACH THE SCREEN - not one per time the words were spoken.
+ *
+ * The coordinator suppresses an intersecting reference emitted within refCooldownSeconds (90 by
+ * default), so a preacher repeating "Matthew 6:33" three times in twenty seconds should produce a
+ * single detection. Listing all three scored that correct behaviour as two misses, which is how a
+ * recall number ends up arguing against the feature working properly.
+ */
 export interface ExpectedReference {
     /** 1-based book number, matching the detection layer's canon numbering. */
     book: number
