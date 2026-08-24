@@ -22,6 +22,7 @@ const commandDispatcher = new CommandDispatcher()
 let scriptureCoordinator: DetectionCoordinator | null = null
 let scriptureConfig: AiScriptureDetectionConfig | null = null
 let scriptureSegmentListener: ((segment: TranscriberSegment) => void) | null = null
+let scriptureInterimListener: ((text: string) => void) | null = null
 // when the renderer last reported a live passage - "reading in progress" context for voice commands
 let lastAnchorAtMs = 0
 const ANCHOR_FRESH_MS = 120000
@@ -52,6 +53,11 @@ export function startScriptureDetection(config: AiScriptureDetectionConfig): boo
     scriptureCoordinator = coordinator
     scriptureConfig = config
 
+    // the unstable tail tells detection whether a reference it is holding is still being spoken -
+    // see DetectionCoordinator.onInterimTail. Never used as transcript content.
+    scriptureInterimListener = (text: string) => coordinator.onInterimTail(text)
+    SpeechToText.addInterimListener(scriptureInterimListener)
+
     scriptureSegmentListener = (segment: TranscriberSegment) => {
         // music lyrics are hallucination territory - never let them trigger detections or commands
         if (segment.music) return
@@ -77,6 +83,8 @@ export function startScriptureDetection(config: AiScriptureDetectionConfig): boo
 export function stopScriptureDetection() {
     if (scriptureSegmentListener) {
         SpeechToText.removeSegmentListener(scriptureSegmentListener)
+        if (scriptureInterimListener) SpeechToText.removeInterimListener(scriptureInterimListener)
+        scriptureInterimListener = null
         scriptureSegmentListener = null
     }
 

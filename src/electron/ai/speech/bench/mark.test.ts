@@ -46,46 +46,71 @@ function wordsOf(wav: string, model: string): Word[] {
 }
 
 /**
- * The SHORTEST window of words that still resolves to the same reference. Growing a window until
- * something matches would mark the phrase as ending wherever the window happened to stop; shrinking
- * it afterwards pins the end on the last word that is actually part of the reference.
+ * The FULLEST reference the speaker actually said.
+ *
+ * The first window that resolves is not it. "Hebrews chapter 10" is a complete, high-confidence
+ * reference to Hebrews 10:1 - but the preacher went on to say "verse 35", and marking the short
+ * form made the ground truth wrong in exactly the case detection has to get right. It scored a
+ * premature projection of 10:1 as a hit and the correct projection of 10:35 as a miss, which is
+ * the opposite of the truth.
+ *
+ * So: find where a reference starts, then keep extending while it still resolves to the same book
+ * and chapter, and take the last window that does. That grows "Hebrews chapter 10" into "Hebrews
+ * chapter 10 verse 35" and stops before the next sentence drags in something unrelated.
  */
 function referencesIn(words: Word[]) {
     const found: { book: number; chapter: number; verseStart: number; verseEnd?: number; phrase: string; phraseEndMs: number }[] = []
     let cursor = 0
 
+    const resolve = (from: number, to: number) => {
+        const text = words
+            .slice(from, to)
+            .map((w) => w.text)
+            .join(" ")
+        const refs = detectExplicitReferences(normalizeSpokenNumbers(text), BENCH_BOOKS)
+        return refs.length && refs[0].confidence === "high" ? refs[0] : null
+    }
+
     while (cursor < words.length) {
-        let hit: { at: number; end: number; ref: ReturnType<typeof detectExplicitReferences>[0] } | null = null
+        let start = -1
+        let best: { end: number; ref: NonNullable<ReturnType<typeof resolve>> } | null = null
 
         for (let end = cursor + 1; end <= Math.min(words.length, cursor + MAX_REFERENCE_WORDS); end++) {
-            const text = words
-                .slice(cursor, end)
-                .map((w) => w.text)
-                .join(" ")
-            const refs = detectExplicitReferences(normalizeSpokenNumbers(text), BENCH_BOOKS)
-            if (refs.length && refs[0].confidence === "high") {
-                hit = { at: cursor, end, ref: refs[0] }
-                break
-            }
+            const ref = resolve(cursor, end)
+            if (!ref) continue
+            if (start < 0) start = cursor
+            // keep the longest form of the SAME passage; a different book or chapter is the next
+            // reference, not a refinement of this one
+            if (best && (ref.bookNumber !== best.ref.bookNumber || ref.chapter !== best.ref.chapter)) break
+            best = { end, ref }
         }
 
-        if (!hit) {
+        if (!best) {
             cursor++
             continue
         }
 
+        // "verse number twelve" is a way of saying verse 12, not a reference to Numbers. The
+        // production guard checks the word before the book name, which the window slicing here
+        // hides - the window starts at "number", so "verse" is never in it.
+        const previous = words[cursor - 1]?.text.toLowerCase().replace(/[^a-z]/g, "")
+        if (best.ref.bookNumber === 4 && (previous === "verse" || previous === "verses")) {
+            cursor = best.end
+            continue
+        }
+
         found.push({
-            book: hit.ref.bookNumber,
-            chapter: hit.ref.chapter,
-            verseStart: hit.ref.verseStart,
-            ...(hit.ref.verseEnd !== hit.ref.verseStart ? { verseEnd: hit.ref.verseEnd } : {}),
+            book: best.ref.bookNumber,
+            chapter: best.ref.chapter,
+            verseStart: best.ref.verseStart,
+            ...(best.ref.verseEnd !== best.ref.verseStart ? { verseEnd: best.ref.verseEnd } : {}),
             phrase: words
-                .slice(hit.at, hit.end)
+                .slice(cursor, best.end)
                 .map((w) => w.text)
                 .join(" "),
-            phraseEndMs: words[hit.end - 1].to
+            phraseEndMs: words[best.end - 1].to
         })
-        cursor = hit.end
+        cursor = best.end
     }
     return found
 }

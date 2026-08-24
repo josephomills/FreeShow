@@ -85,12 +85,10 @@
             player.pause().catch((err) => console.warn("Vimeo pause error:", err))
         } else if (!videoData.paused && paused && !isPlayPending) {
             isPlayPending = true
-            player
-                .play()
-                .catch((err) => {
-                    console.warn("Vimeo play error:", err)
-                    isPlayPending = false
-                })
+            player.play().catch((err) => {
+                console.warn("Vimeo play error:", err)
+                isPlayPending = false
+            })
         }
 
         if (currentMuteState !== shouldBeMuted) {
@@ -130,10 +128,7 @@
 
         try {
             if (targetTime > 0) {
-                await Promise.race([
-                    player.setCurrentTime(targetTime),
-                    timeoutPromise(500)
-                ])
+                await Promise.race([player.setCurrentTime(targetTime), timeoutPromise(500)])
             }
         } catch (err) {
             console.warn("Vimeo setCurrentTime error:", err)

@@ -13,7 +13,7 @@
 import path from "path"
 import { describe, expect, it } from "vitest"
 import { replayDetection, scoreDetection } from "./detection"
-import { availableVariants, benchEngineReady, resolveNemotronModelDir } from "./engines"
+import { availableVariants, benchModelReady, hasSherpa } from "./engines"
 import { availableFixtures, listManifests, loadFixtureSet, type Fixture } from "./fixtures"
 import { runFixture } from "./runner"
 import { bootstrapCi, describe as describeDistribution, mean } from "./stats"
@@ -25,11 +25,11 @@ const withReferences: Fixture[] = listManifests()
     .filter((fixture) => fixture.expected.length > 0)
 
 const variant = availableVariants().find((entry) => entry.id === VARIANT_ID)
-const canRun = !!process.env.AI_BENCH && benchEngineReady(variant?.modelSet) && !!variant && withReferences.length > 0
+const canRun = !!process.env.AI_BENCH && hasSherpa() && !!variant && benchModelReady(variant.modelSet) && withReferences.length > 0
 const describeIfEngine = canRun ? describe : describe.skip
 
 if (process.env.AI_BENCH && !canRun) {
-    console.warn(`[guard a/b] skipped: variant=${VARIANT_ID} model=${resolveNemotronModelDir()} fixtures=${withReferences.length}`)
+    console.warn(`[guard a/b] skipped: variant=${VARIANT_ID} found=${!!variant} sherpa=${hasSherpa()} fixtures=${withReferences.length}`)
 }
 
 interface Side {
@@ -39,12 +39,13 @@ interface Side {
     truePositives: number
     premature: number
     latencies: number[]
+    missedPhrases: string[]
     /** One 1/0 per expected reference, so the interval is over the unit the rate averages. */
     recallUnits: number[]
     precisionUnits: number[]
 }
 
-const empty = (): Side => ({ matched: 0, references: 0, judged: 0, truePositives: 0, premature: 0, latencies: [], recallUnits: [], precisionUnits: [] })
+const empty = (): Side => ({ matched: 0, references: 0, judged: 0, truePositives: 0, premature: 0, latencies: [], missedPhrases: [], recallUnits: [], precisionUnits: [] })
 
 function accumulate(side: Side, score: ReturnType<typeof scoreDetection>) {
     side.matched += score.matches.length
@@ -53,6 +54,7 @@ function accumulate(side: Side, score: ReturnType<typeof scoreDetection>) {
     side.truePositives += score.matches.length
     side.judged += score.matches.length + score.spurious.length
     score.matches.forEach((match) => side.latencies.push(match.latencyMs))
+    score.missed.forEach((reference) => side.missedPhrases.push(`${reference.phrase}@${reference.phraseEndMs}`))
     score.matches.forEach(() => side.recallUnits.push(1))
     score.missed.forEach(() => side.recallUnits.push(0))
     score.matches.forEach(() => side.precisionUnits.push(1))
@@ -89,6 +91,13 @@ describeIfEngine(`hold-until-settled guard (${VARIANT_ID})`, () => {
         console.log(`  ${"".padEnd(14)}${"-".repeat(8).padStart(8)}${"-".repeat(10).padStart(10)}${"-".repeat(11).padStart(11)}${"-".repeat(10).padStart(10)}${"-".repeat(11).padStart(11)}${"-".repeat(10).padStart(10)}${"-".repeat(8).padStart(8)}${"-".repeat(8).padStart(8)}${"-".repeat(8).padStart(8)}`)
         console.log(row("without guard", unheld))
         console.log(row("with guard", held))
+        const both = held.missedPhrases.filter((phrase) => unheld.missedPhrases.includes(phrase))
+        const onlyHeld = held.missedPhrases.filter((phrase) => !unheld.missedPhrases.includes(phrase))
+        const onlyUnheld = unheld.missedPhrases.filter((phrase) => !held.missedPhrases.includes(phrase))
+        console.log(`\n  missed by BOTH (${both.length}): the engine never transcribed them well enough`)
+        console.log(`  missed ONLY with the guard: ${onlyHeld.length ? onlyHeld.join(" | ") : "none"}`)
+        console.log(`  missed ONLY without it:     ${onlyUnheld.length ? onlyUnheld.join(" | ") : "none"}`)
+
         console.log(`\n  premature = a wrong passage projected before the right one. latency in ms from the`)
         console.log(`  last word of the spoken phrase to the reference becoming actionable.`)
 

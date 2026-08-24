@@ -87,7 +87,7 @@ function getMediaCropGeometry(crop: CropState["crop"], cropHasValues: boolean, b
         return `width: ${pptWidth}%;height: ${pptHeight}%;left: ${pptLeft}%;top: ${pptTop}%;${clipPath}`
     }
 
-    const clipPath = (cropHasValues || borderRadius) ? `clip-path: inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%${roundStr});-webkit-clip-path: inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%${roundStr});` : ""
+    const clipPath = cropHasValues || borderRadius ? `clip-path: inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%${roundStr});-webkit-clip-path: inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%${roundStr});` : ""
     return `width: 100%;height: 100%;left: 0;top: 0;${clipPath}`
 }
 
