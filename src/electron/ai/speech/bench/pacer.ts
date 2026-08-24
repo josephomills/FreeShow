@@ -31,11 +31,25 @@ export interface PacerOptions {
      *         runner refuses to report them.
      */
     mode: PaceMode
+    /**
+     * Fraction of chunks to DROP, simulating a machine too busy to deliver every one.
+     *
+     * The streaming driver's whole premise is that the audio it receives is continuous - the
+     * encoder cache is only valid if nothing is missing. A live fault appeared while the same
+     * laptop was decoding video, running the app and running the engine, which is exactly the
+     * condition under which the capture worklet or the IPC hop would start dropping frames. The
+     * batch driver it replaced was immune, because it re-decoded each utterance from scratch.
+     *
+     * The clock still advances over a dropped chunk: the audio existed, it just never arrived.
+     */
+    dropRate?: number
     /** Called after every chunk, for progress reporting on long fixtures. */
     onProgress?: (audioPushedMs: number, totalMs: number) => void
 }
 
 export interface PacerStats {
+    /** Chunks the driver never received, simulating a machine that could not keep up. */
+    droppedChunks: number
     /**
      * CPU time actually consumed inside pushAudio - user + system, from process.cpuUsage().
      *
@@ -104,6 +118,9 @@ export async function pace(driver: TranscriptionDriver, samples: Int16Array, clo
     const startedAt = Date.now()
     const cpuAtStart = process.cpuUsage()
     let pushBlockedMs = 0
+    let dropped = 0
+    // deterministic, so a run that reproduces a fault can be run again and still reproduce it
+    let random = 0x9e3779b9
 
     for (let offset = 0; offset < samples.length; offset += CHUNK_SAMPLES) {
         const count = Math.min(CHUNK_SAMPLES, samples.length - offset)
@@ -112,6 +129,17 @@ export async function pace(driver: TranscriptionDriver, samples: Int16Array, clo
         // the clock advances first: the driver may emit synchronously from inside pushAudio, and
         // that emission was caused by audio including this chunk
         clock.advance(count)
+
+        if (options.dropRate) {
+            random ^= random << 13
+            random ^= random >>> 17
+            random ^= random << 5
+            if ((Math.abs(random) % 10000) / 10000 < options.dropRate) {
+                dropped++
+                options.onProgress?.(clock.audioPushedMs, totalMs)
+                continue
+            }
+        }
 
         const pushStartedAt = Date.now()
         driver.pushAudio(bytes)
@@ -139,6 +167,7 @@ export async function pace(driver: TranscriptionDriver, samples: Int16Array, clo
     pushDurations.sort((a, b) => a - b)
 
     return {
+        droppedChunks: dropped,
         cpuMs: (cpu.user + cpu.system) / 1000,
         audioPushedMs: clock.audioPushedMs,
         wallMs,

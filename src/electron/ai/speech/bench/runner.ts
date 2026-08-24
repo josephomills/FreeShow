@@ -54,6 +54,8 @@ export interface RunOptions {
     fixturePath: string
     variant: EngineVariant
     mode: PaceMode
+    /** Fraction of audio chunks to drop - see PacerOptions.dropRate. */
+    dropRate?: number
     language?: string
     onProgress?: (audioPushedMs: number, totalMs: number) => void
 }
@@ -99,7 +101,7 @@ export async function runFixture(options: RunOptions): Promise<RunResult> {
 
     let pacer: PacerStats
     try {
-        pacer = await pace(driver, wav.samples, clock, { mode: options.mode, onProgress: options.onProgress })
+        pacer = await pace(driver, wav.samples, clock, { mode: options.mode, dropRate: options.dropRate, onProgress: options.onProgress })
     } finally {
         // stop() flushes the utterance still open, and those segments must land in the log
         await driver.stop()
