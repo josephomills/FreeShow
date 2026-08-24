@@ -21,6 +21,8 @@ export interface BenchModelSet {
     repo: string
     /** Chunk grid of this export, in ms. The latency floor. */
     chunkMs: number
+    /** Mel bins. Nemotron 128, Zipformer 80 - and only the latter depends on the config. */
+    featureDim?: number
     languages: "en" | "multi"
     /** Present only where the export ships one - required for hotwords/contextual biasing. */
     hasBpeModel: boolean
@@ -94,6 +96,26 @@ export const BENCH_MODEL_SETS: BenchModelSet[] = [
  */
 export const ZIPFORMER_PARKED = true
 
+export const ZIPFORMER_SET: BenchModelSet = {
+    id: "zipformer-en",
+    repo: "csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26",
+    chunkMs: 320,
+    featureDim: 80,
+    languages: "en",
+    hasBpeModel: true,
+    notes: "72 MB against Nemotron's 682, 0.27 GB of RAM against 2.0, and the only export here that can do hotwords - it ships bpe.model and supports modified_beam_search. Transcribes correctly from sherpa-onnx-node 1.13.6; 1.13.4 returned coherent nonsense from it."
+}
+
+export const ZIPFORMER_MULTI_SET: BenchModelSet = {
+    id: "zipformer-multi",
+    repo: "csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10",
+    chunkMs: 320,
+    featureDim: 80,
+    languages: "multi",
+    hasBpeModel: true,
+    notes: "the only other English-capable export shipping bpe.model, and three years newer than zipformer-en"
+}
+
 export function findModelSet(id: string): BenchModelSet | undefined {
-    return BENCH_MODEL_SETS.find((set) => set.id === id)
+    return [...BENCH_MODEL_SETS, ZIPFORMER_SET, ZIPFORMER_MULTI_SET].find((set) => set.id === id)
 }

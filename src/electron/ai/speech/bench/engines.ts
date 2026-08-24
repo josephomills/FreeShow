@@ -150,6 +150,7 @@ export function createDriver(variant: EngineVariant, callbacks: DriverCallbacks,
         // every commit timing scales off the export's grid, so a 160ms set benched with the
         // shipped 1120ms constants would look far slower than it is
         chunkShiftMs: variant.modelSet ? findModelSet(variant.modelSet)?.chunkMs : undefined,
+        featureDim: variant.modelSet ? findModelSet(variant.modelSet)?.featureDim : undefined,
         resetIntervalMs: variant.resetIntervalMs,
         recognizerOverrides: variant.recognizerOverrides,
         ...callbacks
@@ -176,7 +177,9 @@ export const VARIANTS: EngineVariant[] = [
     { id: "stream en-160", engine: "nemotron", decode: "stream", modelSet: "en-160" },
     { id: "stream multi-1120", engine: "nemotron", decode: "stream", modelSet: "multi-1120", modelLanguage: "en" },
     { id: "stream multi-320", engine: "nemotron", decode: "stream", modelSet: "multi-320", modelLanguage: "en" },
-    { id: "multi-1120 warm", engine: "nemotron", decode: "stream", modelSet: "multi-1120", modelLanguage: "en", resetIntervalMs: 600_000 }
+    { id: "multi-1120 warm", engine: "nemotron", decode: "stream", modelSet: "multi-1120", modelLanguage: "en", resetIntervalMs: 600_000 },
+    { id: "zipformer", engine: "nemotron", decode: "stream", modelSet: "zipformer-en" },
+    { id: "zipformer-multi", engine: "nemotron", decode: "stream", modelSet: "zipformer-multi" }
 ]
 
 /** Variants whose model set is present on this machine. */

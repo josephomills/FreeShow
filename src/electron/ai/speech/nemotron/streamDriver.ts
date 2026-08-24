@@ -114,6 +114,12 @@ interface StreamNemotronOptions extends DriverCallbacks {
      */
     recognizerOverrides?: Record<string, unknown>
     /**
+     * Mel bins the export expects. Nemotron uses 128 and reads it from its own metadata, so the
+     * value is advisory there; the Zipformer exports use 80 and do NOT carry it, so it is the
+     * config that decides and a wrong one yields plausible-but-wrong words.
+     */
+    featureDim?: number
+    /**
      * The export's encoder chunk shift in ms. Defaults to the shipped model's. Only set this when
      * pointing at a different export - every commit timing scales off it.
      */
@@ -174,9 +180,10 @@ export class NemotronStreamDriver implements TranscriptionDriver {
 
         const { recognizerOverrides } = this.options
         this.recognizer = new sherpa.OnlineRecognizer({
-            // the encoder metadata declares feat_dim=128 and sherpa reads it from there, so this
-            // value is advisory - but a wrong one here is a landmine for any future re-export
-            featConfig: { sampleRate: SAMPLE_RATE, featureDim: 128 },
+            // Nemotron declares feat_dim in its metadata and sherpa reads it from there, so this is
+            // advisory for that export - but the Zipformer exports carry no feat_dim and the config
+            // is what decides, so a wrong value there produces coherent, wrong words
+            featConfig: { sampleRate: SAMPLE_RATE, featureDim: this.options.featureDim ?? 128 },
             modelConfig: {
                 transducer: { encoder: paths.encoder, decoder: paths.decoder, joiner: paths.joiner },
                 tokens: paths.tokens,

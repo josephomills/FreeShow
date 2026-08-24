@@ -26,7 +26,9 @@ const SETS = {
     "multi-160": "csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-160ms-int8-2026-06-11",
     // ships bpe.model, so it is the only cross-platform route to hotword biasing:
     // modified_beam_search works here and does not exist for the NeMo transducer
-    "zipformer-en": "csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26"
+    "zipformer-en": "csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26",
+    // the only other English-capable export that ships bpe.model, and newer
+    "zipformer-multi": "csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10"
 }
 
 const FILES = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"]
@@ -38,6 +40,11 @@ const PATTERNS = {
     "zipformer-en": {
         "encoder.int8.onnx": /^encoder-.*chunk-16-left-128\.int8\.onnx$/,
         "decoder.int8.onnx": /^decoder-.*chunk-16-left-128\.int8\.onnx$/,
+        "joiner.int8.onnx": /^joiner-.*chunk-16-left-128\.int8\.onnx$/
+    },
+    "zipformer-multi": {
+        "encoder.int8.onnx": /^encoder-.*chunk-16-left-128\.int8\.onnx$/,
+        "decoder.int8.onnx": /^decoder-.*chunk-16-left-128\.(int8\.)?onnx$/,
         "joiner.int8.onnx": /^joiner-.*chunk-16-left-128\.int8\.onnx$/
     }
 }
