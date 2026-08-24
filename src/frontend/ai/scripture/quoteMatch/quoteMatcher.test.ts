@@ -56,6 +56,46 @@ beforeEach(() => {
 const JOHN_316 = "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"
 
 describe("QuoteMatcher", () => {
+    // With 30+ installed near-identical translations, single decisive wins land all over the
+    // family and following each one hops the projected version per verse. A different version
+    // must win twice in a row before ties start resolving toward it. The fixture pair shares
+    // identical wording for the tie verses (as real translation families do) and diverges
+    // completely on the others, so wins there are decisive.
+    it("moves the tie-preferred translation only after two consecutive off-translation wins", () => {
+        const tieVerse1 = "the lord is my shepherd i shall not want he maketh me to lie down in green pastures"
+        const tieVerse2 = "and we know that all things work together for good to them that love god"
+        const homeA = [verse(19, 23, 1, tieVerse1), verse(45, 8, 28, tieVerse2), verse(43, 3, 16, "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish"), verse(50, 4, 13, "i can do all things through christ which strengtheneth me")]
+        const otherB = [verse(19, 23, 1, tieVerse1), verse(45, 8, 28, tieVerse2), verse(43, 3, 16, "because god treasured the planet deeply he offered his single cherished child so each person trusting him escapes ruin"), verse(50, 4, 13, "every challenge can be handled through the one who supplies my strength and courage")]
+        const filler = [
+            verse(1, 1, 1, "in the beginning god created the heaven and the earth"),
+            verse(1, 1, 2, "and the earth was without form and void and darkness was upon the face of the deep"),
+            verse(40, 5, 3, "blessed are the poor in spirit for theirs is the kingdom of heaven"),
+            verse(40, 5, 4, "blessed are they that mourn for they shall be comforted"),
+            verse(40, 5, 5, "blessed are the meek for they shall inherit the earth"),
+            verse(66, 21, 4, "and god shall wipe away all tears from their eyes and there shall be no more death"),
+            verse(23, 40, 31, "but they that wait upon the lord shall renew their strength they shall mount up with wings as eagles"),
+            verse(45, 12, 1, "i beseech you therefore brethren by the mercies of god that ye present your bodies a living sacrifice"),
+            verse(45, 12, 2, "and be not conformed to this world but be ye transformed by the renewing of your mind"),
+            verse(43, 14, 6, "jesus saith unto him i am the way the truth and the life no man cometh unto the father but by me")
+        ]
+        const matcher = new QuoteMatcher([buildTranslationIndex("homeA", [...homeA, ...filler]), buildTranslationIndex("otherB", [...otherB, ...filler])])
+
+        // one decisive win in the other translation's wording...
+        const first = matcher.onSegment(seg("because god treasured the planet deeply he offered his single cherished child so each person trusting him escapes ruin"))
+        expect(first[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 16, translationId: "otherB" })
+
+        // ...does not hand it the tie-break: identical wording still resolves to the home translation
+        const tied = matcher.onSegment(seg(tieVerse1, 60000))
+        expect(tied[0]).toMatchObject({ book: 19, chapter: 23, verseStart: 1, translationId: "homeA" })
+
+        // a SECOND consecutive decisive win does move it - the reading really switched
+        const second = matcher.onSegment(seg("every challenge can be handled through the one who supplies my strength and courage", 60000))
+        expect(second[0]).toMatchObject({ book: 50, chapter: 4, verseStart: 13, translationId: "otherB" })
+
+        const tiedAfter = matcher.onSegment(seg(tieVerse2, 60000))
+        expect(tiedAfter[0]).toMatchObject({ book: 45, chapter: 8, verseStart: 28, translationId: "otherB" })
+    })
+
     it("emits a full recitation from a single utterance", () => {
         const matcher = new QuoteMatcher([kjvIndex()])
         const out = matcher.onSegment(seg(JOHN_316))

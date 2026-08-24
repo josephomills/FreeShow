@@ -192,6 +192,9 @@ const SCOPE_CUES: ScopeCue[] = [
 // touched - resolvable long after the soft passage memory expired, since the raw list persists
 const SAME_SCOPE_REGEX = /\b(?:in|from) (?:the|this|that) same (psalm|chapter|passage|parable|story|verse|book|letter|epistle|gospel)\b/
 
+// a pending version switch is forgotten after this long - two blips far apart are not a switch
+const PENDING_STICKY_TTL_MS = 3 * 60 * 1000
+
 export class QuoteMatcher {
     private indexes: TranslationIndex[]
     private tuning: Tuning
@@ -215,6 +218,12 @@ export class QuoteMatcher {
     // the translation of the last emission (seeded with the drawer's - the first index) - ties
     // between translations break toward it, so cards stop hopping versions mid-reading
     private stickyTranslationId: string | null = null
+    // a translation only takes the sticky slot after two decisive wins: with 30+ installed
+    // near-identical versions, single decisive wins land all over the family (NASB vs NAS95 vs
+    // NKJV differ by a word) and following each one hops the projected version per verse.
+    // Tie emissions in between are neutral - identical wording says nothing about which version
+    // is being read - so only a decisive win somewhere ELSE or age clears a pending switch
+    private pendingSticky: { translationId: string; atMs: number } | null = null
 
     // canonical refs already emitted (with confidence, for the single medium->high upgrade)
     private emitted = new Map<string, { confidence: "high" | "medium"; upgraded: boolean }>()
@@ -821,7 +830,18 @@ export class QuoteMatcher {
         const key = refKey(ref)
         if (!skipLedger) this.emitted.set(key, { confidence, upgraded: false })
         this.rememberPassage(ref.book, candidate.index.chapter[candidate.ordinal], nowMs)
-        this.stickyTranslationId = candidate.index.translationId
+
+        // the sticky translation follows the READING, not every blip: a different version must
+        // win twice before ties start resolving toward it
+        if (this.pendingSticky && nowMs - this.pendingSticky.atMs > PENDING_STICKY_TTL_MS) this.pendingSticky = null
+        if (candidate.index.translationId !== this.stickyTranslationId) {
+            if (this.pendingSticky?.translationId === candidate.index.translationId) {
+                this.pendingSticky = null
+                this.stickyTranslationId = candidate.index.translationId
+            } else {
+                this.pendingSticky = { translationId: candidate.index.translationId, atMs: nowMs }
+            }
+        }
 
         this.tracker = {
             translationId: candidate.index.translationId,
