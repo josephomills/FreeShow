@@ -14,6 +14,33 @@ const detect = (text: string, language = "en") => detectScriptureCommand(text, l
 
 describe("detectScriptureCommand", () => {
     describe("english positives", () => {
+        // THE SPLIT REFERENCE. A preacher names the book a breath before the jump - "James...
+        // go to chapter 5 verse 16" - a form neither the reference detector (book not adjacent)
+        // nor the plain jump (book unknown) could read. Two live services projected the numbers
+        // inside the wrong book this way.
+        describe("chapter jump after a named book", () => {
+            const books = [
+                { number: 59, names: ["James"] },
+                { number: 46, names: ["1 Corinthians", "First Corinthians"] }
+            ]
+
+            it("carries the book named before the jump", () => {
+                const cmd = detectScriptureCommand("the book of james tells us go to chapter 5 verse 16", "en", TRANSLATIONS, books)
+                expect(cmd).toMatchObject({ type: "chapter_jump", chapter: 5, verse: 16, book: 59, bookName: "James" })
+            })
+
+            it("takes the LAST named book when several were mentioned", () => {
+                const cmd = detectScriptureCommand("we were in james but first corinthians now go to chapter 14 verse 14", "en", TRANSLATIONS, books)
+                expect(cmd).toMatchObject({ type: "chapter_jump", chapter: 14, verse: 14, book: 46 })
+            })
+
+            it("carries no book when none was named", () => {
+                const cmd = detectScriptureCommand("go to chapter 4 verse 2", "en", TRANSLATIONS, books)
+                expect(cmd).toMatchObject({ type: "chapter_jump", chapter: 4, verse: 2 })
+                expect((cmd as { book?: number }).book).toBeUndefined()
+            })
+        })
+
         // SPOKEN ACRONYMS. Letter runs are where streaming ASR is weakest: a live service produced
         // "Give me any be" for "Give me NASB". The names themselves generate their plausible
         // spoken renderings (spokenAcronyms.ts), so any installed acronym is covered untended.

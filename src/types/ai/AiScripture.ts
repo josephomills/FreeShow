@@ -55,7 +55,7 @@ export type AiScriptureCommand =
     | { type: "chapter_previous" }
     | { type: "verse_jump"; verse: number; verseEnd?: number } // verseEnd: spoken range ("verses 1 to 5")
     | { type: "verse_add"; verse?: number } // extend the live selection ("add the next verse" / "add verse 6"); no verse = the next one
-    | { type: "chapter_jump"; chapter: number; verse?: number; verseEnd?: number }
+    | { type: "chapter_jump"; chapter: number; verse?: number; verseEnd?: number; book?: number; bookName?: string } // book: a book named just before the jump ("james... go to chapter 5 verse 16")
     | { type: "translation"; bibleId: string }
     | { type: "translation_cycle" }
     | { type: "translation_main" } // "give me the main translation" - back to the preferred one

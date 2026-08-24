@@ -7,8 +7,9 @@ import type { BibleInstance } from "../../components/drawer/bible/scripture"
 import { loadJsonBible, outputIsScripture } from "../../components/drawer/bible/scripture"
 import { setDrawerTabData } from "../../components/helpers/historyHelpers"
 import { activeScripture, aiScriptureAutoPaused, aiScriptureSuggestions, drawerTabsData, outLocked, scriptureHistory, scriptures } from "../../stores"
+import type { DetectedReference } from "../../../types/ai/AiScripture"
 import { getBookExact, getChapterExact, hasBookNumber } from "./bibleLookup"
-import { parseNumber, projectDetection, projectResolved, restorePrevious } from "./projection"
+import { parseNumber, projectDetection, projectResolved, resolveBookNumber, restorePrevious } from "./projection"
 import { getSettings, scriptureState } from "./scriptureState"
 import { cycleRank, favoriteTranslationIds, preferredTranslationId } from "./translationPreference"
 
@@ -56,11 +57,27 @@ export async function executeScriptureCommand(cmd: AiScriptureCommandEvent): Pro
         const bible = await loadJsonBible(parseId)
         if (!bible) return
 
-        const Book = await bible.getBook(reference.book)
+        // a book named right before the jump ("james... go to chapter 5 verse 16") retargets it -
+        // without this the jump runs inside whatever book is live, which projected "1 Timothy
+        // 5:16" for James 5:16 on a real service
+        let targetBookRef: number | string = reference.book
+        if (cmd.type === "chapter_jump" && cmd.book && cmd.book !== parseNumber(reference.book)) {
+            const resolved = resolveBookNumber(bible, { book: cmd.bookName || "", bookNumber: cmd.book } as DetectedReference)
+            if (!resolved) return
+            targetBookRef = resolved
+        }
+
+        const Book = await getBookExact(bible, targetBookRef)
+        if (!Book) {
+            console.warn(`[AiScripture] Voice command book ${targetBookRef} is not in "${parseId}" - ignoring the command instead of jumping in the wrong book`)
+            return
+        }
         const chapterCount = Book.data.chapters?.length || 0
         const maxVerseOf = async (chapterNumber: number) => {
-            const Chapter = await Book.getChapter(chapterNumber)
-            const chapterVerses = Chapter.data.verses || []
+            // a chapter this book does not have answers as chapter 1 (bibleLookup.ts) - report it
+            // as absent instead, so jump math never clamps against the wrong chapter's verses
+            const Chapter = await getChapterExact(Book, chapterNumber)
+            const chapterVerses = Chapter?.data.verses || []
             return chapterVerses.length ? (chapterVerses[chapterVerses.length - 1]?.number ?? chapterVerses.length) : 0
         }
 
@@ -123,7 +140,8 @@ export async function executeScriptureCommand(cmd: AiScriptureCommandEvent): Pro
             const cap = getSettings().maxVerses ?? 6
             if (cap > 0 && targetVerses.length > cap) targetVerses = targetVerses.slice(0, cap)
         }
-        await projectResolved(currentId, reference.book, targetChapter, targetVerses)
+        console.info(`[AiScripture] Voice command ${cmd.type} -> book ${targetBookRef} ${targetChapter}:${targetVerses[0]}${targetVerses.length > 1 ? "-" + targetVerses[targetVerses.length - 1] : ""} in "${currentId}" ("${cmd.phrase}")`)
+        await projectResolved(currentId, targetBookRef, targetChapter, targetVerses)
     } catch (err) {
         console.error("Error executing AI scripture voice command:", err)
     }

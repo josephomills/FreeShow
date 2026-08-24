@@ -169,14 +169,22 @@ export function detectScriptureCommand(text: string, language: string, translati
     // detection already handles.
     const chapterJump = tail.match(new RegExp(LEAD + imp + "\\s+" + art + chapter + "\\s+(\\d{1,3})\\b(?:\\s+(?:" + verse + "|" + misheard + ")\\s+" + numberSeq + ")?"))
     if (chapterJump) {
+        // A preacher names the book a breath before the jump: "James... go to chapter 5 verse
+        // 16". Without the book, the jump runs inside whatever passage is LIVE - two services
+        // projected "1 Timothy 5:16" for James 5:16 and a clamped James chapter for 1 Cor 14:14
+        // this way. The most recently named book in the same tail travels with the command; a
+        // reference detection for the full form still wins (it resolves first), this only
+        // catches the split form neither layer could read
+        const namedBook = lastNamedBook(tail.slice(0, chapterJump.index), books)
+
         const chapterNumber = parseInt(chapterJump[1], 10)
         const verseNumber = chapterJump[2] !== undefined ? parseInt(chapterJump[2], 10) : 0
         if (chapterNumber >= 1 && verseNumber >= 1) {
             const span = sequenceSpan(verseNumber, chapterJump[3])
-            if (span.end > span.start) return { type: "chapter_jump", chapter: chapterNumber, verse: span.start, verseEnd: span.end, phrase: phraseOf(chapterJump) }
-            return { type: "chapter_jump", chapter: chapterNumber, verse: verseNumber, phrase: phraseOf(chapterJump) }
+            if (span.end > span.start) return { type: "chapter_jump", chapter: chapterNumber, verse: span.start, verseEnd: span.end, ...namedBook, phrase: phraseOf(chapterJump) }
+            return { type: "chapter_jump", chapter: chapterNumber, verse: verseNumber, ...namedBook, phrase: phraseOf(chapterJump) }
         }
-        if (chapterNumber >= 1) return { type: "chapter_jump", chapter: chapterNumber, phrase: phraseOf(chapterJump) }
+        if (chapterNumber >= 1) return { type: "chapter_jump", chapter: chapterNumber, ...namedBook, phrase: phraseOf(chapterJump) }
     }
 
     // 4. cycle: "give me another translation"
@@ -238,4 +246,27 @@ export function detectScriptureCommand(text: string, language: string, translati
     }
 
     return null
+}
+
+/**
+ * The most recently spoken book name in the text before a jump command, so "james... go to
+ * chapter 5 verse 16" jumps in James rather than in whatever book is live. Only the LAST mention
+ * counts - it is the one the jump belongs to.
+ */
+function lastNamedBook(before: string, books: { number: number; names: string[] }[]): { book: number; bookName: string } | undefined {
+    if (!books.length) return undefined
+
+    let best: { book: number; bookName: string; at: number } | undefined
+    for (const book of books) {
+        for (const name of book.names) {
+            const token = name.trim().toLowerCase().replace(/\s+/g, " ")
+            if (token.length < 3) continue
+            const regex = new RegExp("(?:^|[^a-z0-9])" + token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+") + "(?![a-z])", "g")
+            let match: RegExpExecArray | null
+            while ((match = regex.exec(before)) !== null) {
+                if (!best || match.index > best.at) best = { book: book.number, bookName: name, at: match.index }
+            }
+        }
+    }
+    return best ? { book: best.book, bookName: best.bookName } : undefined
 }
