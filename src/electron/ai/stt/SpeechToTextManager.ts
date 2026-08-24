@@ -63,11 +63,13 @@ export class SpeechToText {
     private static stopInternal(emitStatus: boolean) {
         this.sessionToken++
 
+        // the recorder can outlive the engine - a failed start or a stop that lands while the
+        // engine is still being created must not leave it recording (and its header unpatched)
+        this.recorder.stop()
+
         const active = this.transcriberEngine
         this.transcriberEngine = null
         if (!active) return
-
-        this.recorder.stop()
         Promise.resolve(active.stop()).catch((err) => console.error("Error stopping STT engine:", err))
         // whatever interim tail was showing is dead now - a crashed/killed worker never gets to
         // clear it itself, so the authoritative clear lives here on every engine stop

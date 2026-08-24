@@ -172,6 +172,53 @@ describe("NemotronStreamDriver", () => {
         expect(h.streams[0].acceptedCalls).toBe(30)
     })
 
+    // THE VAD-MISS PATH. Live, a music bed held the energy gate shut through 22 seconds of real
+    // preaching: the recognizer decoded all of it, nothing showed, and the whole paragraph then
+    // committed as one lump the moment the VAD finally opened. The recognizer emitting tokens is
+    // itself speech evidence - emission must not wait for the VAD to agree.
+    it("streams words the VAD never noticed instead of committing them as one lump", async () => {
+        const h = await harness({ detected: false, words: ["we", "have", "to", "agree", "with", "spiritual"] })
+
+        // priming + a few chunk shifts: words appear while the VAD stays silent throughout
+        h.push(7000)
+
+        expect(textOf(h.segments)).toContain("we have to agree with")
+        // and incrementally - one segment per growth, not one paragraph at the end
+        expect(h.segments.length).toBeGreaterThan(2)
+    })
+
+    it("closes a VAD-less utterance once its tokens dry up, marking the utterance end", async () => {
+        const h = await harness({ detected: false, words: ["only", "these", "words"] })
+        h.push(6000) // decodes all three words, then the steps keep running dry
+
+        expect(h.segments.some((segment) => segment.utteranceEnd)).toBe(true)
+        expect(textOf(h.segments)).toBe("only these words")
+        // the close resets the decoder like any other utterance boundary (loop containment)
+        expect(h.streams[0].resets).toBeGreaterThan(0)
+    })
+
+    it("reopens for new growth after a stall close", async () => {
+        const h = await harness({ detected: false, words: ["first", "burst"] })
+        h.push(7000) // burst decodes, stall close fires
+
+        const closes = h.segments.filter((segment) => segment.utteranceEnd).length
+        expect(closes).toBe(1)
+
+        h.controls.words.push("second", "wave")
+        h.push(6000)
+
+        expect(textOf(h.segments)).toContain("second wave")
+        expect(h.segments.filter((segment) => segment.utteranceEnd).length).toBe(2)
+    })
+
+    it("never stall-closes an utterance the VAD is still holding open", async () => {
+        // music: VAD detected continuously, tokens stalled - the VAD owns the close, not the stall
+        const h = await harness({ detected: true, words: ["lyric"] })
+        h.push(10000)
+
+        expect(h.segments.some((segment) => segment.utteranceEnd)).toBe(false)
+    })
+
     it("emits a word on the step that produces it, with no agreement delay", async () => {
         const h = await harness({ words: ["alpha", "bravo", "charlie"] })
 

@@ -93,7 +93,12 @@ function gridTimings(chunkShiftMs: number) {
         // used a flat 500ms, which is less than one 1120ms step - under a persistent stream that
         // closes before the final word's own chunk has run. Waiting costs nothing here: the audio
         // is being decoded either way, there is no batch to assemble.
-        closeDeferSamples: Math.ceil(((chunkShiftMs + 100) / 1000) * SAMPLE_RATE)
+        closeDeferSamples: Math.ceil(((chunkShiftMs + 100) / 1000) * SAMPLE_RATE),
+        // How long the hypothesis may sit unchanged before an utterance the VAD never opened is
+        // closed anyway (see the text-growth open below - such an utterance gets no VAD close
+        // event, ever). One chunk shift of decode lag plus the VAD's own silence window, so a real
+        // VAD close - which needs only the silence window - always arrives first when there is one.
+        stallCloseSamples: Math.ceil(((chunkShiftMs + VAD_MIN_SILENCE * 1000 + 100) / 1000) * SAMPLE_RATE)
     }
 }
 
@@ -156,6 +161,10 @@ export class NemotronStreamDriver implements TranscriptionDriver {
     private inUtterance = false
     /** Absolute sample index at which the open utterance must be closed, 0 when none is pending. */
     private finalizeAtSample = 0
+    /** Absolute sample index of the last hypothesis change - the recognizer's own speech evidence. */
+    private lastGrowthAtSample = 0
+    /** Length of the hypothesis at the previous push - the stall clock ticks on CHANGE, because a held trailing word keeps unemitted text around forever. */
+    private lastHypothesisLength = 0
 
     // Emission is tracked in CHARACTERS of the hypothesis, not words. Greedy RNN-T emits BPE
     // pieces, so the trailing word grows in place ("Ephes" -> "Ephesians"); a word counter cannot
@@ -260,13 +269,22 @@ export class NemotronStreamDriver implements TranscriptionDriver {
 
             this.totalSamples += samples.length
 
-            if (this.vad.isDetected()) {
+            // The VAD is not the only evidence of speech: the recognizer emitting tokens IS
+            // speech - greedy RNN-T emits only blanks on silence. A music bed or a soft opening
+            // can hold the energy gate shut for tens of seconds while the hypothesis quietly
+            // grows; without this, all of that text sat invisible and then committed as one
+            // paragraph-sized lump the moment the VAD finally opened (22s observed live).
+            const hypothesisLength = this.readText().length
+            if (hypothesisLength !== this.lastHypothesisLength) this.lastGrowthAtSample = this.totalSamples
+            this.lastHypothesisLength = hypothesisLength
+
+            if (this.vad.isDetected() || (hypothesisLength > this.emittedChars && !this.inUtterance)) {
                 if (!this.inUtterance) {
                     this.inUtterance = true
                     this.nextEmitStartMs = Math.max(this.nextEmitStartMs, this.currentMs())
                 }
                 // speech resumed inside the defer window - it was a pause, not an end
-                this.finalizeAtSample = 0
+                if (this.vad.isDetected()) this.finalizeAtSample = 0
             }
 
             // drain the VAD's own queue; a close arms the deferred boundary
@@ -277,6 +295,13 @@ export class NemotronStreamDriver implements TranscriptionDriver {
             }
             if (closed && this.inUtterance && !this.finalizeAtSample) {
                 this.finalizeAtSample = this.totalSamples + this.timings.closeDeferSamples
+            }
+
+            // an utterance the VAD never opened gets no close event from it - when the tokens dry
+            // up and the VAD hears nothing, close it here. A VAD-opened utterance never reaches
+            // this: its close fires after the silence window alone, well before the stall trips
+            if (this.inUtterance && !this.finalizeAtSample && !this.vad.isDetected() && this.totalSamples - this.lastGrowthAtSample >= this.timings.stallCloseSamples) {
+                this.finalizeAtSample = this.totalSamples
             }
 
             if (this.finalizeAtSample && this.totalSamples >= this.finalizeAtSample) {
@@ -379,6 +404,7 @@ export class NemotronStreamDriver implements TranscriptionDriver {
         this.lastResetAtSample = this.totalSamples
         this.emittedChars = 0
         this.lastText = ""
+        this.lastHypothesisLength = 0
     }
 
     /** Close the open utterance: commit the remainder, then clear the hypothesis. */
