@@ -197,11 +197,16 @@ describe("bench/detection scoring", () => {
         expect(score.duplicates).toBe(0)
     })
 
-    it("refuses to credit a detection that fired before the phrase was spoken", () => {
+    it("counts a detection of a listed passage that fired early apart from a false positive", () => {
+        // The manifest cannot tell the two readings apart: the preacher may have named the passage
+        // earlier without it being marked - mentions inside the cooldown window are deliberately
+        // collapsed - or the matcher may have fired on something else. Blaming precision assumed
+        // the second, and on real audio that was wrong four times out of thirteen.
         const score = scoreDetection(replayOf([emission(5000, { bookNumber: 43, chapter: 3, verseStart: 16 })]), [expected({ phraseEndMs: 20000 })])
 
         expect(score.matched).toBe(0)
-        expect(score.falsePositives).toBe(1)
+        expect(score.falsePositives).toBe(0)
+        expect(score.earlyRepeats).toBe(1)
     })
 
     it("allows the hand-marking tolerance, with a negative latency", () => {

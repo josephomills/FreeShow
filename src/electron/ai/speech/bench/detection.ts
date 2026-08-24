@@ -236,6 +236,14 @@ export interface DetectionScore {
     matches: DetectionMatch[]
     missed: ExpectedReference[]
     spurious: DetectionEmission[]
+    /**
+     * Detections of a listed passage that fired BEFORE its marked phrase. Counted apart from both
+     * buckets because the manifest cannot tell the two readings apart: the preacher may have named
+     * the passage earlier without it being marked - mentions inside the cooldown window are
+     * deliberately collapsed - or the matcher may have fired on something else entirely. Folding
+     * them into precision either way would assert something the ground truth does not know.
+     */
+    earlyRepeats: number
 }
 
 export interface DetectionScoreOptions {
@@ -309,14 +317,26 @@ export function scoreDetection(replay: DetectionReplay, expected: ExpectedRefere
     // else - including a detection that fired before the phrase it names was spoken - is spurious.
     const spurious: DetectionEmission[] = []
     let duplicates = 0
+    let earlyRepeats = 0
     detections.forEach((detection, at) => {
         if (consumed.has(at)) return
-        // A late detection of a passage the manifest knows about is still a repeat, not a false
-        // positive - the preacher came back to it, and the manifest only lists marked phrases. The
-        // window above governs what counts as ANSWERING a phrase; this only governs blame.
-        const repeat = references.some((reference) => detection.audioMs >= reference.phraseEndMs - tolerance && sameReference(detection.reference, reference))
-        if (repeat) duplicates++
-        else spurious.push(detection)
+        // A detection of a passage the manifest lists is a repeat, not a false positive, whenever
+        // it fires - the manifest records the phrases someone marked, not every time the preacher
+        // named the passage, and it collapses mentions inside the cooldown window. Requiring the
+        // repeat to come AFTER the marked instance blamed the engine for finding a passage the
+        // preacher had already introduced minutes earlier: Matthew 5:1, Acts 17:1 and Hebrews 4:1
+        // were all counted as wrong while being exactly right.
+        //
+        // The window above still governs what counts as ANSWERING a marked phrase, so this cannot
+        // inflate recall; it only governs blame. A genuinely premature hit is unaffected, because
+        // "Matthew 6:1" is not the same passage as the "Matthew 6:33" that was marked.
+        const repeat = references.some((reference) => sameReference(detection.reference, reference))
+        if (!repeat) {
+            spurious.push(detection)
+            return
+        }
+        if (references.some((reference) => sameReference(detection.reference, reference) && detection.audioMs >= reference.phraseEndMs - tolerance)) duplicates++
+        else earlyRepeats++
     })
 
     const matched = matches.length
@@ -341,7 +361,8 @@ export function scoreDetection(replay: DetectionReplay, expected: ExpectedRefere
         rangeMismatches,
         matches,
         missed,
-        spurious
+        spurious,
+        earlyRepeats
     }
 }
 
