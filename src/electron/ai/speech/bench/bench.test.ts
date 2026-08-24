@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest"
 import { availableVariants, benchEngineReady, resolveNemotronModelDir } from "./engines"
 import { availableFixtures, listManifests, loadFixtureSet, resolveManifestDir, type Fixture, type FixtureSet } from "./fixtures"
 import { align, normalizeForWer, vocabularyErrorRate } from "./align"
+import { replayDetection, scoreDetection } from "./detection"
 import { scoreRun } from "./metrics"
 import { AudioClock, CHUNK_MS, CHUNK_SAMPLES, chunkToBytes, pace } from "./pacer"
 import { renderConsoleReport, renderMarkdownDiff, toRunRecord, writeReport, type RunRecord } from "./report"
@@ -278,7 +279,13 @@ describeIfEngine("bench/nemotron (real model)", () => {
                 for (const variant of variants) {
                     const result = await runFixture({ fixtureId: fixture.id, fixturePath: fixture.absolutePath, variant, mode: "max" })
                     const metrics = scoreRun(result, fixture.transcript)
-                    records.push(toRunRecord(result, metrics, set, stamp))
+
+                    // The product metric. Replayed from the event log this decode already produced,
+                    // so it costs no audio and no engine - but it must be awaited here in the loop
+                    // rather than gathered up afterwards: replayDetection drives the coordinator off
+                    // a patched global Date.now and refuses to run while another replay holds it.
+                    const detection = scoreDetection(await replayDetection(result), fixture.expected ?? [])
+                    records.push(toRunRecord(result, metrics, set, stamp, detection))
 
                     // the invariant every latency number rests on
                     const audioTimes = result.events.map((event) => event.audioMs)
@@ -291,6 +298,10 @@ describeIfEngine("bench/nemotron (real model)", () => {
                     // returns nothing there is arguably behaving correctly. Failing the slice on it
                     // discards the whole fixture set for every variant.
                     if (!result.hypothesis) console.warn(`  [${fixture.id} / ${variant.id}] empty transcript - check whether this excerpt is speech`)
+
+                    // named while the fixture is fresh in the log; the pooled recall in the report
+                    // says how many were missed but never which phrase the operator would have lost
+                    for (const missed of detection.missed) console.warn(`  [${fixture.id} / ${variant.id}] missed "${missed.phrase}" at ${missed.phraseEndMs}ms`)
                 }
             }
 

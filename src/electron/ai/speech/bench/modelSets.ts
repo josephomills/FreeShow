@@ -63,20 +63,34 @@ export const BENCH_MODEL_SETS: BenchModelSet[] = [
 ]
 
 /**
- * Parked, not dismissed. The Zipformer is the ONLY cross-platform route to contextual biasing -
- * hotwords need modified_beam_search plus a BPE vocabulary, and no Nemotron export supports either
- * (k2-fsa/sherpa-onnx#3572). Its other numbers are striking: 72 MB against Nemotron's 660 MB, and
- * it decodes at RTF 0.024 against the streaming Nemotron's 0.06.
+ * Parked after a real attempt, not dismissed. It remains the most interesting model here on every
+ * axis except the one that matters: 72 MB against Nemotron's 682 MB, 0.27 GB of RAM against 2.0 GB,
+ * RTF 0.024 against 0.06 - and it is the ONLY cross-platform route to contextual biasing, because
+ * hotwords need modified_beam_search plus a BPE vocabulary and no Nemotron export supports either
+ * (k2-fsa/sherpa-onnx#3572).
  *
- * Two things stopped it here. It transcribes garbage under every file pairing tried so far - int8
- * and fp32 encoder, int8 and fp32 decoder - producing plausible but wrong English ("UNCLE YELLOW"
- * for "AFTER EARLY NIGHTFALL THE YELLOW LAMPS"), on LibriSpeech as well as on sermon audio, so it
- * is a configuration fault rather than a domain mismatch. And the repo ships bpe.model but not
- * bpe.vocab, which is what sherpa's hotword path actually wants ("Each line in vocab should contain
- * two items ... the first one is bpe token, the second one is score") - exporting it needs
- * sentencepiece.
+ * It transcribes plausible-but-wrong English. On the LibriSpeech clip the repo itself ships, whose
+ * reference is "AFTER EARLY NIGHTFALL THE YELLOW LAMPS...", it returns "YOU LIKE A MAN OF THE" and
+ * "UNCLE ELD ME OH". Coherent words, correct casing, drawn from the right vocabulary - the shape of
+ * a feature mismatch, not of a corrupt file or a domain gap.
  *
- * Worth returning to once the tier and multilingual questions are settled.
+ * Ruled out, each tested against that known-good clip:
+ *   - quantization: int8 and fp32 encoder, int8 and fp32 decoder and joiner, every combination
+ *   - streaming context: both the left-128 and left-64 exports
+ *   - flush: inputFinished() as well as trailing silence
+ *   - feed shape: 100ms chunks and the whole clip in one call
+ *   - sample scaling: [-1,1] is correct (int16 range returns nothing at all)
+ *   - feature options: dither, snipEdges
+ *   - the token table: 502 entries, uppercase, and the output words come from it, so the id-to-text
+ *     mapping is right and the acoustic model is simply choosing wrong ids
+ *
+ * The untested lead, and the right next step: run this model through sherpa-onnx's own CLI. If the
+ * CLI transcribes it correctly then the fault is in the Node binding's feature path and none of the
+ * above would ever have found it; if the CLI fails too, the export is at fault and belongs upstream.
+ *
+ * Its hotword path needs a second thing regardless: the repo ships bpe.model, while sherpa wants
+ * bpe.vocab ("Each line in vocab should contain two items ... the first one is bpe token, the second
+ * one is score"), which requires sentencepiece to export.
  */
 export const ZIPFORMER_PARKED = true
 

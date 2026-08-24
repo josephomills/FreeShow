@@ -16,10 +16,11 @@
 
 import fs from "fs"
 import path from "path"
+import { summarizeDetection, type DetectionScore } from "./detection"
 import type { RunMetrics } from "./metrics"
 import type { PaceMode } from "./pacer"
 import type { RunResult } from "./runner"
-import { bootstrapCi, mean, percentile } from "./stats"
+import { bootstrapCi, mean, percentile, type Distribution } from "./stats"
 
 export interface RunRecord {
     fixtureSetId: string
@@ -34,10 +35,16 @@ export interface RunRecord {
     timestampMs: number
     /** Set when the fixture was not natively 16 kHz - a WER caveat, not a blocker. */
     resampledFrom?: number
+    /**
+     * The product metric for this run - whether the reference the speaker asked for was found, and
+     * how late. Replayed from the event log (detection.ts), so a record without it is a
+     * transcription-only run rather than a run where detection failed.
+     */
+    detection?: DetectionScore
     metrics: RunMetrics
 }
 
-export function toRunRecord(result: RunResult, metrics: RunMetrics, fixtureSet: { id: string; hash: string }, timestampMs: number): RunRecord {
+export function toRunRecord(result: RunResult, metrics: RunMetrics, fixtureSet: { id: string; hash: string }, timestampMs: number, detection?: DetectionScore): RunRecord {
     return {
         fixtureSetId: fixtureSet.id,
         fixtureSetHash: fixtureSet.hash,
@@ -48,6 +55,7 @@ export function toRunRecord(result: RunResult, metrics: RunMetrics, fixtureSet: 
         arch: result.arch,
         timestampMs,
         ...(result.resampledFrom ? { resampledFrom: result.resampledFrom } : {}),
+        ...(detection ? { detection } : {}),
         metrics
     }
 }
@@ -138,6 +146,58 @@ export function intervalsOverlap(a: RateSummary | undefined, b: RateSummary | un
 
 // SUMMARY
 
+export interface DetectionRates {
+    /** Runs whose fixture listed at least one reference. Recall is a statement about these only. */
+    referenceRuns: number
+    expectedReferences: number
+    matched: number
+    falsePositives: number
+    /**
+     * Absent - never 0% - when no fixture in the group listed a reference: silence about a
+     * question nobody asked is not a failure to answer it.
+     *
+     * Its n counts expected references rather than runs, because recall is the mean of one
+     * hit-or-miss per reference. That is the weighting a reader wants: a clip with one mention
+     * cannot outvote a sermon with six.
+     */
+    recall?: RateSummary
+    /** Absent when nothing at all was detected. n counts the detections that were judged. */
+    precision?: RateSummary
+    /**
+     * Per run, and the reference-free runs are in it deliberately - a clip nobody asked a verse
+     * from is the only honest measure of how often the feature interrupts a service.
+     */
+    falsePositivesPerMinute: RateSummary
+    /** Pooled from every match's own latency, so these percentiles are exact rather than medians. */
+    latencyMs: Distribution
+}
+
+/**
+ * The pooled counts come from summarizeDetection (detection.ts owns what pools how). What is added
+ * here is guardrail 2: an interval for each rate, resampled from the same units the rate is a mean
+ * of - references for recall, judged detections for precision - so the interval is centred on the
+ * headline number instead of on a per-fixture average that would sit somewhere else.
+ */
+function summarizeDetectionRates(records: RunRecord[]): DetectionRates | undefined {
+    const scores = records.map((record) => record.detection).filter((score): score is DetectionScore => !!score)
+    if (!scores.length) return undefined
+
+    const pooled = summarizeDetection(scores)
+    const hits = scores.flatMap((score) => [...score.matches.map(() => 1), ...score.missed.map(() => 0)])
+    const judged = scores.flatMap((score) => [...score.matches.map(() => 1), ...score.spurious.map(() => 0)])
+
+    return {
+        referenceRuns: pooled.referenceFixtures,
+        expectedReferences: pooled.expectedCount,
+        matched: pooled.matched,
+        falsePositives: pooled.falsePositives,
+        ...(hits.length ? { recall: summarizeRate(hits) } : {}),
+        ...(judged.length ? { precision: summarizeRate(judged) } : {}),
+        falsePositivesPerMinute: summarizeRate(scores.map((score) => (score.audioDurationMs ? score.falsePositives / (score.audioDurationMs / 60000) : 0))),
+        latencyMs: pooled.latencyMs
+    }
+}
+
 export interface VariantSummary {
     variantId: string
     /** Runs aggregated. Every interval below is drawn from exactly these. */
@@ -154,6 +214,8 @@ export interface VariantSummary {
     echoesPerMinute: RateSummary
     wer?: RateSummary
     vocabulary?: RateSummary
+    /** Absent when no run in the group replayed detection. */
+    detection?: DetectionRates
 }
 
 /** First-appearance order, so the caller's variant ordering (baseline first) survives. */
@@ -188,6 +250,7 @@ export function summarizeVariant(variantId: string, records: RunRecord[]): Varia
 
     const werValues = records.map((record) => record.metrics.wer?.wer).filter((value): value is number => value !== undefined)
     const vocabularyValues = records.map((record) => record.metrics.vocabulary?.rate).filter((value): value is number => value !== undefined)
+    const detection = summarizeDetectionRates(records)
 
     return {
         variantId,
@@ -203,7 +266,8 @@ export function summarizeVariant(variantId: string, records: RunRecord[]): Varia
         decodeCost: summarizeRate(records.map((record) => record.metrics.decodeCostRatio)),
         echoesPerMinute: summarizeRate(records.map((record) => (record.metrics.audioDurationMs ? record.metrics.interimEchoes.length / (record.metrics.audioDurationMs / 60000) : 0))),
         ...(werValues.length ? { wer: summarizeRate(werValues) } : {}),
-        ...(vocabularyValues.length ? { vocabulary: summarizeRate(vocabularyValues) } : {})
+        ...(vocabularyValues.length ? { vocabulary: summarizeRate(vocabularyValues) } : {}),
+        ...(detection ? { detection } : {})
     }
 }
 
@@ -305,15 +369,23 @@ export function writeReport(records: RunRecord[], outDir = resolveReportDir()): 
 
 // CONSOLE
 
+/**
+ * A terminal has a fixed budget, so the detection block is not free: when a run scored detection -
+ * the product metric - it takes the room that the lag tail and the interim echoes had. Both are
+ * still in the markdown diff and in the JSON, and the choice is deliberate: a reader comparing two
+ * variants wants to know whether the verse was found before they want the echo rate.
+ */
 function variantRows(summaries: VariantSummary[]): { columns: Column[]; rows: string[][] } {
     const withVocabulary = summaries.some((summary) => summary.vocabulary)
+    const withDetection = summaries.some((summary) => summary.detection)
+    const latency = (summary: VariantSummary, pick: (distribution: Distribution) => number) => (summary.detection?.latencyMs.n ? formatMs(pick(summary.detection.latencyMs)) : "-")
 
     const columns: Column[] = [
         { header: "variant", align: "left" },
         { header: "n", align: "right" },
         { header: "decode", align: "right" },
         { header: "lag mean", align: "right" },
-        { header: "lag p95", align: "right" },
+        ...(withDetection ? [] : ([{ header: "lag p95", align: "right" }] as Column[])),
         { header: "WER", align: "right" },
         { header: "WER 95% CI", align: "right" },
         ...(withVocabulary
@@ -322,8 +394,19 @@ function variantRows(summaries: VariantSummary[]): { columns: Column[]; rows: st
                   { header: "vocab CI", align: "right" }
               ] as Column[])
             : []),
-        { header: "echo/min", align: "right" },
-        { header: "echo CI", align: "right" },
+        ...(withDetection
+            ? ([
+                  { header: "recall", align: "right" },
+                  { header: "recall CI", align: "right" },
+                  { header: "prec", align: "right" },
+                  { header: "fp/min", align: "right" },
+                  { header: "det50", align: "right" },
+                  { header: "det95", align: "right" }
+              ] as Column[])
+            : ([
+                  { header: "echo/min", align: "right" },
+                  { header: "echo CI", align: "right" }
+              ] as Column[])),
         { header: "err", align: "right" }
     ]
 
@@ -332,12 +415,21 @@ function variantRows(summaries: VariantSummary[]): { columns: Column[]; rows: st
         `${summary.runs}`,
         `${formatRatio(summary.decodeCost.value)}x`,
         formatMs(summary.lagMeanMs),
-        formatMs(summary.lagP95Ms),
+        ...(withDetection ? [] : [formatMs(summary.lagP95Ms)]),
         summary.wer ? formatPercent(summary.wer.value) : "-",
         formatCi(summary.wer, percentValue),
         ...(withVocabulary ? [summary.vocabulary ? formatPercent(summary.vocabulary.value) : "-", formatCi(summary.vocabulary, percentValue)] : []),
-        formatRate(summary.echoesPerMinute.value),
-        formatCi(summary.echoesPerMinute, formatRate),
+        ...(withDetection
+            ? [
+                  // "-" and not "0.0%": this fixture never asked for a verse, so there was nothing to recall
+                  summary.detection?.recall ? formatPercent(summary.detection.recall.value) : "-",
+                  formatCi(summary.detection?.recall, percentValue),
+                  summary.detection?.precision ? formatPercent(summary.detection.precision.value) : "-",
+                  summary.detection ? formatRate(summary.detection.falsePositivesPerMinute.value) : "-",
+                  latency(summary, (distribution) => distribution.p50),
+                  latency(summary, (distribution) => distribution.p95)
+              ]
+            : [formatRate(summary.echoesPerMinute.value), formatCi(summary.echoesPerMinute, formatRate)]),
         `${summary.errors}`
     ])
 
@@ -363,14 +455,22 @@ export function renderConsoleReport(records: RunRecord[]): string {
     const variants = distinct(records.map((record) => record.variantId))
 
     const lines = [`AI BENCH  ${set.id} [${set.hash}]`, `  ${report.environments[0]} | mode=${report.modes[0]} | ${groups.length} fixture(s) | ${variants.length} variant(s) | ${new Date(report.generatedAtMs).toISOString()}`, `  n = runs pooled; 95% CI = bootstrap over those runs. n=1 prints as n=1, not as an interval.`]
+    if (records.some((record) => record.detection)) {
+        lines.push(`  recall/prec = scripture references found; recall's own n is references, not runs, and`)
+        lines.push(`  prints "-" where the fixture listed none. det50/det95 = ms from the spoken phrase`)
+        lines.push(`  ending to the reference being actionable. Precision's interval is in the markdown diff.`)
+    }
     for (const warning of report.warnings) lines.push(`  ! ${warning}`)
 
     for (const group of groups) {
         const seconds = (Math.max(...group.records.map((record) => record.metrics.audioDurationMs)) / 1000).toFixed(1)
         const refWords = Math.max(0, ...group.records.map((record) => record.metrics.wer?.refLength ?? 0))
+        // named next to the fixture rather than in a column, because it is the reason a recall cell
+        // is "-" and a reader should not have to infer that from an empty number
+        const expected = Math.max(0, ...group.records.map((record) => record.detection?.expectedCount ?? 0))
 
         lines.push("")
-        lines.push(`=== ${group.fixtureId} | ${seconds}s${refWords ? ` | ${refWords} ref words` : ""} ===`)
+        lines.push(`=== ${group.fixtureId} | ${seconds}s${refWords ? ` | ${refWords} ref words` : ""}${expected ? ` | ${expected} expected ref(s)` : ""} ===`)
         lines.push(renderVariantTable(summarizeByVariant(group.records)))
     }
 
@@ -391,7 +491,7 @@ interface MetricRow {
     label: string
     direction: Direction
     rate?: (summary: VariantSummary) => RateSummary | undefined
-    value?: (summary: VariantSummary) => number
+    value?: (summary: VariantSummary) => number | undefined
     format: (value: number) => string
     /** Interval ends, when printing them the same way as the value would repeat the unit. */
     formatBound?: (value: number) => string
@@ -401,9 +501,18 @@ interface MetricRow {
 
 const signed = (delta: number, format: (value: number) => string) => `${delta >= 0 ? "+" : "-"}${format(Math.abs(delta))}`
 
+const pointsDelta = (delta: number) => `${signed(delta, percentValue)} pp`
+
+// Detection leads: WER says how many words the engine got right, these say whether the feature
+// worked. A p50 or p95 of "-" means nothing was matched, which is not a latency of zero.
 const METRIC_ROWS: MetricRow[] = [
-    { label: "WER", direction: "lower", rate: (summary) => summary.wer, format: formatPercent, formatBound: percentValue, formatDelta: (delta) => `${signed(delta, percentValue)} pp` },
-    { label: "vocabulary WER", direction: "lower", rate: (summary) => summary.vocabulary, format: formatPercent, formatBound: percentValue, formatDelta: (delta) => `${signed(delta, percentValue)} pp` },
+    { label: "detection recall", direction: "higher", rate: (summary) => summary.detection?.recall, format: formatPercent, formatBound: percentValue, formatDelta: pointsDelta },
+    { label: "detection precision", direction: "higher", rate: (summary) => summary.detection?.precision, format: formatPercent, formatBound: percentValue, formatDelta: pointsDelta },
+    { label: "false positives / min", direction: "lower", rate: (summary) => summary.detection?.falsePositivesPerMinute, format: formatRate },
+    { label: "detection latency p50 (ms)", direction: "lower", value: (summary) => (summary.detection?.latencyMs.n ? summary.detection.latencyMs.p50 : undefined), format: formatMs },
+    { label: "detection latency p95 (ms)", direction: "lower", value: (summary) => (summary.detection?.latencyMs.n ? summary.detection.latencyMs.p95 : undefined), format: formatMs },
+    { label: "WER", direction: "lower", rate: (summary) => summary.wer, format: formatPercent, formatBound: percentValue, formatDelta: pointsDelta },
+    { label: "vocabulary WER", direction: "lower", rate: (summary) => summary.vocabulary, format: formatPercent, formatBound: percentValue, formatDelta: pointsDelta },
     { label: "commit lag mean (ms)", direction: "lower", value: (summary) => summary.lagMeanMs, format: formatMs },
     { label: "commit lag p50 (ms)", direction: "lower", value: (summary) => summary.lagP50Ms, format: formatMs },
     { label: "commit lag p95 (ms)", direction: "lower", value: (summary) => summary.lagP95Ms, format: formatMs },
@@ -486,6 +595,14 @@ export function renderMarkdownDiff(records: RunRecord[], baselineVariantId: stri
         "> and a delta whose intervals overlap is marked *within noise* because it is not a result.",
         ""
     ]
+
+    // Recall's denominator, spelled out: without it a reader cannot tell 100% over three references
+    // in one sermon from 100% over a whole fixture set, and the rest of the audio still counts
+    // against false positives per minute even though it contributes nothing to recall.
+    const detection = baseline.detection
+    if (detection) {
+        lines.push(detection.expectedReferences ? `> Detection recall is over ${detection.expectedReferences} expected reference(s) in ${detection.referenceRuns} of ${baseline.runs} run(s). The runs that list none score no recall at all - they contribute only false positives per minute.` : `> No fixture in this set lists an expected reference, so there is no recall to report; only false positives per minute is meaningful here.`, "")
+    }
 
     for (const warning of report.warnings) lines.push(`> **Warning** ${warning}`, "")
 
