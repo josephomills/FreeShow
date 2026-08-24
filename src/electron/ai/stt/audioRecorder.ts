@@ -27,6 +27,12 @@ export class SessionAudioRecorder {
 
     /** Begin a recording. Failure is logged and ignored - a diagnostic must never break a service. */
     start(directory: string, startedAtMs: number): void {
+        // A session can be started more than once - the renderer restarts the engine without
+        // restarting capture, and each pass reaches listen(). Overwriting the handle leaked the
+        // previous file descriptor and left that file with the placeholder header, so a session
+        // produced a real recording and a small unreadable one beside it.
+        this.stop()
+
         try {
             fs.mkdirSync(directory, { recursive: true })
             this.file = path.join(directory, `session-${new Date(startedAtMs).toISOString().replace(/[:.]/g, "-")}.wav`)

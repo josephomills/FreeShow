@@ -11,8 +11,27 @@
 
 /** Longest phrase considered - beyond this a repeat is more likely to be real speech. */
 const MAX_PHRASE_TOKENS = 8
-/** How many times a phrase must repeat back-to-back before it is a loop rather than emphasis. */
-const MIN_REPEATS = 3
+
+/**
+ * How many times a phrase must repeat back-to-back before it is a decoder loop rather than a person
+ * speaking, by phrase length.
+ *
+ * Preaching repeats deliberately - a word said three or four times for emphasis is a rhetorical
+ * device, not a fault, and treating it as one clears the decoder mid-sentence and corrupts what
+ * follows. The observed decoder loops ran to twenty repeats and more, so there is a lot of room
+ * between the two.
+ *
+ * A single word tolerates the most, because that is what a speaker actually does. Repeating a
+ * four-word phrase even four times over is not something people say.
+ */
+function minRepeatsFor(phraseTokens: number): number {
+    if (phraseTokens === 1) return 8
+    if (phraseTokens === 2) return 6
+    return 4
+}
+
+/** The smallest threshold any phrase length uses - below this nothing can qualify. */
+const MIN_REPEATS = 4
 
 interface Token {
     text: string
@@ -40,7 +59,8 @@ export function findRepeatedTail(text: string): number {
     if (tokens.length < MIN_REPEATS * 2) return -1
 
     for (let size = 1; size <= MAX_PHRASE_TOKENS; size++) {
-        if (tokens.length < size * MIN_REPEATS) break
+        const needed = minRepeatsFor(size)
+        if (tokens.length < size * needed) continue
 
         const phrase = tokens.slice(tokens.length - size).map((token) => token.text)
         let repeats = 1
@@ -53,9 +73,7 @@ export function findRepeatedTail(text: string): number {
             repeats++
         }
 
-        // a single word repeated twice is emphasis ("very, very"); a phrase repeated three times is
-        // not something a person says
-        if (repeats >= MIN_REPEATS) return tokens[start + size].at
+        if (repeats >= needed) return tokens[start + size].at
     }
     return -1
 }
@@ -94,7 +112,8 @@ export function summarizeRepetition(text: string): RepetitionSummary {
         if (looped[start]) continue
 
         for (let size = 1; size <= MAX_PHRASE_TOKENS; size++) {
-            if (start + size * MIN_REPEATS > tokens.length) break
+            const needed = minRepeatsFor(size)
+            if (start + size * needed > tokens.length) continue
 
             const phrase = tokens
                 .slice(start, start + size)
@@ -110,7 +129,7 @@ export function summarizeRepetition(text: string): RepetitionSummary {
                 repeats++
             }
 
-            if (repeats >= MIN_REPEATS) {
+            if (repeats >= needed) {
                 const length = size * repeats
                 for (let at = start; at < start + length; at++) looped[at] = true
                 runs++

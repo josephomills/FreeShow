@@ -30,6 +30,8 @@ interface FakeControls {
 }
 
 class FakeStream {
+    /** How many times the decoder state was cleared - the observable effect of breaking a loop. */
+    resets = 0
     buffered = 0
     consumed = 0
     pendingSteps = 0
@@ -69,6 +71,7 @@ function makeSherpa(controls: FakeControls) {
             return { text: stream.text, start_time: stream.startTime }
         }
         reset(stream: FakeStream) {
+            stream.resets++
             stream.text = ""
             stream.startTime = stream.consumed / 1000
         }
@@ -350,20 +353,24 @@ describe("NemotronStreamDriver", () => {
         // seen live: the transcript filled with "and he saith the LORD" over and over. The
         // predictor's own output is its next input, so nothing in the audio pulls it out - only
         // clearing the decoder state does.
-        const h = await harness({ words: ["saith", "the", "lord", "saith", "the", "lord", "saith", "the", "lord"] })
-        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 9)
+        // five repeats of a three-word phrase - well past rhetorical repetition, which a preacher
+        // does deliberately and which must not clear the decoder mid-sentence
+        const cycle = ["saith", "the", "lord"]
+        const words = [...cycle, ...cycle, ...cycle, ...cycle, ...cycle]
+        const h = await harness({ words })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * (words.length + 1))
 
-        // the decoder state is cleared, which is what actually stops it - a loop can only be
-        // recognised once it has repeated, so some of it escapes first. Catching it after three
+        // clearing the decoder state is what actually stops it - a loop can only be recognised once
+        // it has repeated, so some of it always escapes first. Catching it after a handful of
         // repeats instead of twenty is the whole gain.
-        expect(h.streams[0].text).toBe("")
-        const words = textOf(h.segments).split(/\s+/).filter(Boolean)
-        expect(words.length).toBeLessThan(9)
+        expect(h.streams[0].resets).toBeGreaterThan(0)
+        const emitted = textOf(h.segments).split(/\s+/).filter(Boolean)
+        expect(emitted.length).toBeLessThan(words.length)
     })
 
     it("keeps the first occurrence of the repeated phrase", async () => {
-        const h = await harness({ words: ["holy", "is", "he", "amen", "amen", "amen"] })
-        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 6)
+        const h = await harness({ words: ["holy", "is", "he", "amen", "amen", "amen", "amen", "amen", "amen", "amen", "amen"] })
+        h.push(NEMOTRON_PRIMING_MS + NEMOTRON_CHUNK_SHIFT_MS * 12)
 
         expect(textOf(h.segments)).toContain("holy is he")
     })

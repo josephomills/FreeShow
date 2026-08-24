@@ -76,3 +76,26 @@ describe("session audio recorder", () => {
         expect(recorder.active).toBe(false)
     })
 })
+
+describe("starting twice", () => {
+    it("closes the first recording instead of orphaning it", () => {
+        // the renderer restarts the engine without restarting capture, so listen() - and this - can
+        // run twice for one session. Seen live as a real recording plus a small unreadable file.
+        const recorder = new SessionAudioRecorder()
+        const at = fs.mkdtempSync(path.join(os.tmpdir(), "freeshow-rec-"))
+
+        recorder.start(at, 0)
+        recorder.write(pcm(800))
+        recorder.start(at, 60_000)
+        recorder.write(pcm(1600))
+        recorder.stop()
+
+        const files = fs.readdirSync(at).sort()
+        expect(files).toHaveLength(2)
+        for (const name of files) {
+            const buffer = fs.readFileSync(path.join(at, name))
+            // both must be readable: the header has to describe what is actually in the file
+            expect(buffer.readUInt32LE(40)).toBe(buffer.length - 44)
+        }
+    })
+})
