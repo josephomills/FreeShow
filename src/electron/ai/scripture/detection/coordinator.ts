@@ -73,22 +73,11 @@ const LLM_MIN_NEW_WORDS = 15 // don't call the LLM again until this much new spe
 const LLM_ALREADY_DETECTED_MS = 180000 // recently emitted refs sent to the LLM so it skips them
 const DEFAULT_COOLDOWN_SECONDS = 90 // suppress re-emitting an intersecting reference within this window
 
-// A reference held at the end of the transcript is waiting to learn whether it is still growing.
-// The transcriber already knows: its INTERIM tail is the words it has decoded but not yet trusted,
-// and it runs about a chunk ahead of the committed text. We never read that tail as content - only
-// ask whether whatever follows could extend a reference - which is a far weaker claim than
-// transcribing it correctly, so being wrong about it costs a little latency rather than a wrong
-// projection. A number, a number word or a range word could continue the reference; anything else
-// ends it.
-const CONTINUES_A_REFERENCE = /^(?:\d|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|verse|verses|chapter|to|through|till|until|and|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b/
-
 export class DetectionCoordinator {
     private opts: DetectionCoordinatorOptions
     private bookIndex: BookIndex
     private cooldownMs: number
     private holdProvisional: boolean
-    /** Latest unstable tail from the transcriber, used only to decide whether to keep waiting. */
-    private interimTail = ""
 
     // a single replaced anchor object - strictly bounded, never accumulates over a long sermon
     private anchor: AiScriptureAnchor | null = null
@@ -144,29 +133,8 @@ export class DetectionCoordinator {
         this.totalWords += countWords(segment.text)
         this.trimRollingTranscript()
 
-        this.runTier1(segment.utteranceEnd === true || this.interimEndsAReference())
+        this.runTier1(segment.utteranceEnd === true)
         this.maybeRunTier2()
-    }
-
-    /**
-     * The transcriber's unstable tail. Feeding it releases a held reference as soon as the next
-     * thing said cannot extend it, instead of waiting for that word to be committed - which is
-     * roughly a chunk sooner. Never used as transcript content.
-     */
-    onInterimTail(text: string): void {
-        if (this.stopped) return
-
-        const tail = text.trim().toLowerCase()
-        if (tail === this.interimTail) return
-        this.interimTail = tail
-
-        // only worth re-checking when the tail says the reference is over
-        if (this.segments.length && this.interimEndsAReference()) this.runTier1(true)
-    }
-
-    /** True when something has been decoded after the reference and it cannot be part of one. */
-    private interimEndsAReference(): boolean {
-        return !!this.interimTail && !CONTINUES_A_REFERENCE.test(this.interimTail)
     }
 
     stop(): void {
@@ -178,7 +146,6 @@ export class DetectionCoordinator {
         }
         this.segments = []
         this.emitted.clear()
-        this.interimTail = ""
     }
 
     // TIER 1

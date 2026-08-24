@@ -70,30 +70,45 @@ function referencesIn(words: Word[]) {
         const refs = detectExplicitReferences(normalizeSpokenNumbers(text), BENCH_BOOKS)
         return refs.length && refs[0].confidence === "high" ? refs[0] : null
     }
+    const same = (a: { bookNumber: number; chapter: number }, b: { bookNumber: number; chapter: number }) => a.bookNumber === b.bookNumber && a.chapter === b.chapter
 
     while (cursor < words.length) {
-        let start = -1
-        let best: { end: number; ref: NonNullable<ReturnType<typeof resolve>> } | null = null
-
-        for (let end = cursor + 1; end <= Math.min(words.length, cursor + MAX_REFERENCE_WORDS); end++) {
-            const ref = resolve(cursor, end)
-            if (!ref) continue
-            if (start < 0) start = cursor
-            // keep the longest form of the SAME passage; a different book or chapter is the next
-            // reference, not a refinement of this one
-            if (best && (ref.bookNumber !== best.ref.bookNumber || ref.chapter !== best.ref.chapter)) break
-            best = { end, ref }
+        // 1. find any window that resolves. Its start is wherever the scan happened to be, so the
+        //    reference may sit several words into it.
+        let end = cursor + 1
+        let ref = null as ReturnType<typeof resolve>
+        for (; end <= Math.min(words.length, cursor + MAX_REFERENCE_WORDS); end++) {
+            ref = resolve(cursor, end)
+            if (ref) break
         }
-
-        if (!best) {
+        if (!ref) {
             cursor++
             continue
         }
 
+        // 2. shrink from the left to the real start. Without this the word budget below is spent on
+        //    leading narration - "to believe the word of God. Hebrews chapter 10" is already nine
+        //    words, so the extension never reached the "verse 35" the preacher actually said.
+        let from = cursor
+        while (from + 1 < end) {
+            const trimmed = resolve(from + 1, end)
+            if (!trimmed || !same(trimmed, ref)) break
+            from++
+            ref = trimmed
+        }
+
+        // 3. now extend right, from the reference itself, to the fullest form of the same passage
+        let best = { end, ref }
+        for (let grow = end + 1; grow <= Math.min(words.length, from + MAX_REFERENCE_WORDS); grow++) {
+            const grown = resolve(from, grow)
+            if (!grown) continue
+            if (!same(grown, best.ref)) break
+            best = { end: grow, ref: grown }
+        }
+
         // "verse number twelve" is a way of saying verse 12, not a reference to Numbers. The
-        // production guard checks the word before the book name, which the window slicing here
-        // hides - the window starts at "number", so "verse" is never in it.
-        const previous = words[cursor - 1]?.text.toLowerCase().replace(/[^a-z]/g, "")
+        // production guard checks the word before the book name, which this slicing hides.
+        const previous = words[from - 1]?.text.toLowerCase().replace(/[^a-z]/g, "")
         if (best.ref.bookNumber === 4 && (previous === "verse" || previous === "verses")) {
             cursor = best.end
             continue
@@ -105,7 +120,7 @@ function referencesIn(words: Word[]) {
             verseStart: best.ref.verseStart,
             ...(best.ref.verseEnd !== best.ref.verseStart ? { verseEnd: best.ref.verseEnd } : {}),
             phrase: words
-                .slice(cursor, best.end)
+                .slice(from, best.end)
                 .map((w) => w.text)
                 .join(" "),
             phraseEndMs: words[best.end - 1].to

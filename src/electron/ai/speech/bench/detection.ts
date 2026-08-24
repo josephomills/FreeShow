@@ -100,12 +100,6 @@ export interface DetectionReplayOptions {
      * way to price what it costs and what it buys on identical audio.
      */
     holdProvisionalReferences?: boolean
-    /**
-     * Feed the run's interim events to the coordinator, which releases a held reference as soon as
-     * the unstable tail shows the next thing said cannot extend it - about a chunk sooner than
-     * waiting for that word to be committed.
-     */
-    useInterimLookahead?: boolean
     /** Defaults to the plain English canon. Pass a real bible's table to measure that instead. */
     books?: AiScriptureBook[]
     /**
@@ -185,13 +179,7 @@ export async function replayDetection(result: RunResult, options: DetectionRepla
     let segmentsFed = 0
     try {
         for (const event of result.events) {
-            if (event.kind === "interim") {
-                if (options.useInterimLookahead) {
-                    audioMs = event.audioMs
-                    coordinator.onInterimTail(event.text)
-                }
-                continue // detection never sees interim text as CONTENT, only as a lookahead signal
-            }
+            if (event.kind !== "segment") continue // detection never sees interim text
             if (event.music || !event.text) continue // sung content & utterance-boundary markers are dropped upstream
 
             audioMs = event.audioMs

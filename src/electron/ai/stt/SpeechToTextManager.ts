@@ -17,9 +17,6 @@ export class SpeechToText {
     static sessionToken = 0
     // features (e.g. scripture detection) subscribe to the transcript stream while their toggle is on
     private static segmentListeners: Set<SegmentListener> = new Set()
-    // the unstable tail. Display shows it greyed; scripture detection uses it ONLY to tell whether
-    // a reference it is holding is still being spoken - never as transcript content
-    private static interimListeners: Set<(text: string) => void> = new Set()
 
     static async listen(engine: string, options: SttEngineOptions): Promise<{ started: boolean; error?: string }> {
         this.stopInternal(false)
@@ -123,14 +120,6 @@ export class SpeechToText {
         return { error: "unknown_engine" }
     }
 
-    static addInterimListener(listener: (text: string) => void) {
-        this.interimListeners.add(listener)
-    }
-
-    static removeInterimListener(listener: (text: string) => void) {
-        this.interimListeners.delete(listener)
-    }
-
     static addSegmentListener(listener: SegmentListener) {
         this.segmentListeners.add(listener)
     }
@@ -148,7 +137,6 @@ export class SpeechToText {
     // the open utterance's unstable tail - display only (shown greyed), detection never sees it
     private static onInterim(text: string) {
         sendToMain(ToMain.AI_TRANSCRIPT_INTERIM, { text })
-        this.interimListeners.forEach((listener) => listener(text))
     }
 
     private static onError(message: string) {
