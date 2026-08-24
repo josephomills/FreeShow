@@ -41,8 +41,14 @@ export interface RunMetrics {
     vocabulary?: { errors: number; total: number; rate: number; missed: string[] }
     /** Interim text that reappeared after the same words were already finalized - visible flicker. */
     interimEchoes: { audioMs: number; text: string }[]
-    /** pushBlocked total / audio duration. A crude but honest CPU cost per second of audio. */
+    /**
+     * CPU seconds consumed per second of audio. Above 1.0 the engine cannot keep up on this
+     * machine. Derived from process.cpuUsage(), not wall time - see PacerStats.cpuMs for why that
+     * distinction is the difference between a real number and a measure of how busy the desktop was.
+     */
     decodeCostRatio: number
+    /** The same ratio computed from wall time. Only meaningful on an otherwise idle machine. */
+    wallCostRatio: number
     startupMs: number
     errors: string[]
 }
@@ -145,7 +151,8 @@ export function scoreRun(result: RunResult, reference?: string, vocabulary?: Set
         audioDurationMs: result.audioDurationMs,
         commitLag: commitLag(result),
         interimEchoes: interimEchoes(result),
-        decodeCostRatio: result.audioDurationMs ? result.pacer.pushBlockedMs / result.audioDurationMs : 0,
+        decodeCostRatio: result.audioDurationMs ? result.pacer.cpuMs / result.audioDurationMs : 0,
+        wallCostRatio: result.audioDurationMs ? result.pacer.pushBlockedMs / result.audioDurationMs : 0,
         startupMs: result.startupMs,
         errors: result.errors
     }

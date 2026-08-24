@@ -116,6 +116,7 @@ function main() {
     const rows = variants.map((variant) => {
         const mine = records.filter((r) => r.variantId === variant && covered.includes(`${r.fixtureSetId}/${r.fixtureId}`))
         const decode = mine.map((r) => r.metrics.decodeCostRatio)
+        const wall = mine.map((r) => r.metrics.wallCostRatio).filter((v) => Number.isFinite(v))
         const wer = mine.filter((r) => r.metrics.wer && scored.includes(`${r.fixtureSetId}/${r.fixtureId}`)).map((r) => r.metrics.wer.wer)
         const lagMean = mine.map((r) => r.metrics.commitLag.lag.mean)
         const lagMax = mine.map((r) => r.metrics.commitLag.lag.max)
@@ -125,9 +126,12 @@ function main() {
         return [variant, mine.length, mean(decode).toFixed(3) + "x", Math.round(mean(lagMean)), Math.round(Math.max(...lagMax)), wer.length ? (mean(wer) * 100).toFixed(1) + "%" : "-", werCi ? `${(werCi.low * 100).toFixed(1)}-${(werCi.high * 100).toFixed(1)}` : "n<2", echo.reduce((a, b) => a + b, 0)]
     })
 
-    console.log(table(rows, ["variant", "n", "decode", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]))
-    console.log(`\ndecode = CPU per second of audio. lag = ms a word is visible as interim before it is committed;`)
-    console.log(`detection only ever sees committed text. echo = a word visibly repeated on screen.`)
+    console.log(table(rows, ["variant", "n", "cpu", "wall", "lag mean", "lag max", "WER", "WER 95% CI", "echo"]))
+    console.log(`\ncpu  = CPU seconds per second of audio - the engine's real cost. Above 1.0 it cannot keep up.`)
+    console.log(`wall = the same thing measured in wall time, which on a busy desktop measures the desktop.`)
+    console.log(`       Compare engines on cpu; a large wall/cpu gap just means the machine was loaded.`)
+    console.log(`lag  = ms a word is visible as interim before it is committed; detection only sees committed`)
+    console.log(`       text. echo = a word visibly repeated on screen.`)
     console.log(`\nWER here is against a whisper large-v3 PSEUDO-reference on the sermon fixtures. It measures`)
     console.log(`agreement with whisper, not truth, and is only meaningful for ranking these variants`)
     console.log(`against each other. Overlapping CIs mean the difference is not resolved at this n.`)

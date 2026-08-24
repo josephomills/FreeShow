@@ -200,7 +200,7 @@ describe("bench/metrics", () => {
                 .filter((event) => event.kind === "segment")
                 .map((event) => event.text)
                 .join(" "),
-            pacer: { audioPushedMs: 5000, wallMs: 0, pushBlockedMs: 500, pushBlockedP50: 0, pushBlockedP99: 0, pushBlockedMax: 0, driftMs: 0 },
+            pacer: { cpuMs: 500, audioPushedMs: 5000, wallMs: 0, pushBlockedMs: 500, pushBlockedP50: 0, pushBlockedP99: 0, pushBlockedMax: 0, driftMs: 0 },
             startupMs: 0,
             errors: [],
             platform: "test",

@@ -36,11 +36,25 @@ export interface PacerOptions {
 }
 
 export interface PacerStats {
+    /**
+     * CPU time actually consumed inside pushAudio - user + system, from process.cpuUsage().
+     *
+     * This is the number to compare engines on, NOT the wall-clock figures below. Wall time inside
+     * pushAudio includes every millisecond the process spent descheduled, so on a working desktop
+     * it measures how busy the machine is rather than how much work the decoder did. Measured: the
+     * same variant on the same audio reported 0.086x of audio on an idle run and 1.079x during a
+     * matrix run with the machine at load 17 - a twelvefold difference with no change to the engine.
+     */
+    cpuMs: number
     /** Total audio handed to the driver. */
     audioPushedMs: number
     /** Wall time from first push to last. Only meaningful in "rt" mode. */
     wallMs: number
-    /** Time spent inside pushAudio() itself - the driver blocking the caller. */
+    /**
+     * Wall time spent inside pushAudio(). Kept because it is what a caller actually experiences -
+     * a push that blocks for 600ms blocks for 600ms however busy the machine is - but it is not a
+     * measure of the engine. Compare engines on cpuMs.
+     */
     pushBlockedMs: number
     pushBlockedP50: number
     pushBlockedP99: number
@@ -88,6 +102,7 @@ export async function pace(driver: TranscriptionDriver, samples: Int16Array, clo
     const pushDurations: number[] = []
 
     const startedAt = Date.now()
+    const cpuAtStart = process.cpuUsage()
     let pushBlockedMs = 0
 
     for (let offset = 0; offset < samples.length; offset += CHUNK_SAMPLES) {
@@ -120,9 +135,11 @@ export async function pace(driver: TranscriptionDriver, samples: Int16Array, clo
     }
 
     const wallMs = Date.now() - startedAt
+    const cpu = process.cpuUsage(cpuAtStart)
     pushDurations.sort((a, b) => a - b)
 
     return {
+        cpuMs: (cpu.user + cpu.system) / 1000,
         audioPushedMs: clock.audioPushedMs,
         wallMs,
         pushBlockedMs,
