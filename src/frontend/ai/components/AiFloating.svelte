@@ -180,6 +180,18 @@
     // drawer: the cards then all claim the matched translation while the projections go to
     // the preferred one (or worse, genuinely follow the drawer - see translationPreference)
     $: drawerBibleId = $drawerTabsData.scripture?.activeSubTab || ""
+
+    // the translation whose WORDING the quote matched, when it is not the one being projected -
+    // "have no desire" matching Acts 18:15 is unreadable against the KJV's wording, and only the
+    // CEB tag on the quote explains where the match lives
+    function getMatchedTag(suggestion: DetectedReference): string {
+        if (!suggestion.matchedBibleId) return ""
+        const projected = suggestion.spokenBibleId || (getSettings().displayTranslation === "matched" ? suggestion.matchedBibleId : "") || preferredTranslationId() || drawerBibleId
+        if (suggestion.matchedBibleId === projected) return ""
+        const bible = $scriptures[suggestion.matchedBibleId]
+        return bible ? getShortBibleName(bible.customName || bible.name || "") : ""
+    }
+
     function getReferenceLabel(suggestion: DetectedReference, _updater: any = null) {
         let label = `${suggestion.book} ${suggestion.chapter}:${suggestion.verseStart}`
         if (suggestion.verseEnd > suggestion.verseStart) label += `-${suggestion.verseEnd}`
@@ -243,7 +255,9 @@
                 </div>
 
                 {#if suggestion.quote}
-                    <p class="quote">"{suggestion.quote}"</p>
+                    <p class="quote">
+                        "{suggestion.quote}"{#if getMatchedTag(suggestion)}&nbsp;({getMatchedTag(suggestion)}){/if}
+                    </p>
                 {/if}
 
                 <div class="suggestionActions">
