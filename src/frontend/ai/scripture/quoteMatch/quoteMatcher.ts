@@ -39,7 +39,7 @@ export interface QuoteMatchEmission {
     confidence: "high" | "medium"
     translationId: string
     quoteText: string // the transcript stretch that matched
-    kind: "fresh" | "continuation" | "upgrade" | "correction"
+    kind: "fresh" | "continuation" | "upgrade" | "correction" | "requote" // requote: a verse returned to after the reading moved on
     corrects?: RefKey // correction only: the earlier emission this one supersedes (same speech, better match)
 }
 
@@ -201,6 +201,10 @@ const SAME_SCOPE_REGEX = /\b(?:in|from) (?:the|this|that) same (psalm|chapter|pa
 // a pending version switch is forgotten after this long - two blips far apart are not a switch
 const PENDING_STICKY_TTL_MS = 3 * 60 * 1000
 
+// how long after a verse's emission a verbatim re-quote of it may re-project it - inside this
+// window the same words are usually the reading's own residue still in the transcript window
+const REQUOTE_AFTER_MS = 30_000
+
 export class QuoteMatcher {
     private indexes: TranslationIndex[]
     private tuning: Tuning
@@ -233,7 +237,7 @@ export class QuoteMatcher {
     private pendingSticky: { translationId: string; atMs: number } | null = null
 
     // canonical refs already emitted (with confidence, for the single medium->high upgrade)
-    private emitted = new Map<string, { confidence: "high" | "medium"; upgraded: boolean }>()
+    private emitted = new Map<string, { confidence: "high" | "medium"; upgraded: boolean; atMs: number }>()
     // the last emission and WHEN its matched speech ended - a different ref built from the same
     // speech stretch is a reinterpretation (more words narrowed the search), not a second quote
     private lastEmitted: { ref: RefKey; queryToMs: number } | null = null
@@ -744,6 +748,20 @@ export class QuoteMatcher {
                 already.upgraded = true
                 return [this.emit(top, "high", "upgrade", nowMs, true, candidates)]
             }
+
+            // A verse deliberately RETURNED to re-projects. A preacher read Psalm 119:1-6, then
+            // later quoted v1 verbatim - and nothing happened, because this ledger was permanent.
+            // Three conditions separate a return from an echo: the reading has moved on (the
+            // verse is not the live passage), enough time has passed that the words are not the
+            // reading's own residue still in the window, and the new evidence clears the strong
+            // single-shot bar entirely on its own - a fragment must never yank the output back.
+            const strongAlone = top.align.matchedInformative >= tuning.SINGLE_SHOT_INFORMATIVE && top.align.matchedWeight >= tuning.SINGLE_SHOT_WEIGHT && top.align.score >= tuning.EMIT_HIGH
+            if (strongAlone && nowMs - already.atMs >= REQUOTE_AFTER_MS && !this.isLivePassage(top)) {
+                already.atMs = nowMs
+                already.confidence = "high"
+                return [this.emit(top, "high", "requote", nowMs, true, candidates)]
+            }
+
             this.bumpPreviousTop(key)
             return []
         }
@@ -765,6 +783,13 @@ export class QuoteMatcher {
         const emission = this.emit(top, confidence, corrects ? "correction" : "fresh", nowMs, false, candidates)
         if (corrects) emission.corrects = corrects
         return [emission]
+    }
+
+    /** Whether this candidate IS what the output is showing right now (per the projection anchor). */
+    private isLivePassage(candidate: Candidate): boolean {
+        if (!this.anchor) return false
+        const ref = this.refOf(candidate)
+        return ref.book === this.anchor.bookNumber && candidate.index.chapter[candidate.ordinal] === this.anchor.chapter && ref.verseStart <= this.anchor.verseEnd && ref.verseEnd >= this.anchor.verseStart
     }
 
     /** The earlier emission this candidate supersedes, or null when it is simply a new quote. */
@@ -842,7 +867,7 @@ export class QuoteMatcher {
         const candidate = this.preferGrounded(pool, chosen)
         const ref = this.refOf(candidate)
         const key = refKey(ref)
-        if (!skipLedger) this.emitted.set(key, { confidence, upgraded: false })
+        if (!skipLedger) this.emitted.set(key, { confidence, upgraded: false, atMs: nowMs })
         this.rememberPassage(ref.book, candidate.index.chapter[candidate.ordinal], nowMs)
 
         // the sticky translation follows the READING, not every blip: a different version must

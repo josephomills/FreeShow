@@ -80,6 +80,9 @@ const TIER1_WINDOW_MS = 15000 // tier 1 only rescans the most recent speech
 const LLM_MIN_NEW_WORDS = 15 // don't call the LLM again until this much new speech arrived
 const LLM_ALREADY_DETECTED_MS = 180000 // recently emitted refs sent to the LLM so it skips them
 const DEFAULT_COOLDOWN_SECONDS = 90 // suppress re-emitting an intersecting reference within this window
+// within this floor a repeat is the same breath ("John 3:16... John 3:16!") - suppressed even
+// when the reference is not the live passage
+const REEMIT_FLOOR_MS = 15000
 
 /**
  * How long a chapter with no spoken verse waits to see whether one follows.
@@ -412,8 +415,14 @@ export class DetectionCoordinator {
         const keepMs = Math.max(this.cooldownMs, LLM_ALREADY_DETECTED_MS)
         const entries = (this.emitted.get(key) || []).filter((entry) => now - entry.timestamp < keepMs)
 
-        // suppress when it intersects (same book+chapter and overlapping verse range) a reference emitted within the cooldown
-        const suppressed = entries.some((entry) => now - entry.timestamp < this.cooldownMs && candidate.verseStart <= entry.verseEnd && candidate.verseEnd >= entry.verseStart)
+        // Suppress when it intersects (same book+chapter and overlapping verse range) a reference
+        // emitted within the cooldown - but only while it is STILL what the output is showing, or
+        // for a short floor after emission. The cooldown exists to stop re-projecting what is
+        // already on screen; a preacher RETURNING to a passage after the projection moved on is a
+        // change of output they asked for in words, and holding it for the rest of a 90s window
+        // left a re-quoted Psalm 119:1 stuck behind the v6 the reading had advanced to.
+        const anchorIntersects = this.anchor && this.anchor.bookNumber === candidate.bookNumber && this.anchor.chapter === candidate.chapter && candidate.verseStart <= this.anchor.verseEnd && candidate.verseEnd >= this.anchor.verseStart
+        const suppressed = entries.some((entry) => now - entry.timestamp < this.cooldownMs && candidate.verseStart <= entry.verseEnd && candidate.verseEnd >= entry.verseStart && (anchorIntersects || now - entry.timestamp < REEMIT_FLOOR_MS))
         if (!suppressed) {
             entries.push({ book: candidate.book, chapter: candidate.chapter, verseStart: candidate.verseStart, verseEnd: candidate.verseEnd, timestamp: now })
             this.opts.onDetection({

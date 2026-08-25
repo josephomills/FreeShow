@@ -157,7 +157,13 @@ export async function replayDetection(result: RunResult, options: DetectionRepla
         getApiKey: options.getApiKey ?? (() => ""),
         cooldownSeconds: options.cooldownSeconds,
         holdProvisionalReferences: options.holdProvisionalReferences,
-        onDetection: (reference) => detections.push({ audioMs, reference }),
+        onDetection: (reference) => {
+            detections.push({ audioMs, reference })
+            // live auto mode projects a detection and the anchor follows it, which is what keeps
+            // the cooldown suppressing repeats of the LIVE passage - without simulating that,
+            // every re-mention would replay as a fresh detection and inflate false positives
+            coordinator.updateContext({ book: reference.book, bookNumber: reference.bookNumber, chapter: reference.chapter, verseStart: reference.verseStart, verseEnd: reference.verseEnd })
+        },
         onStatus: (state, extra) => statuses.push({ state, ...(extra?.message ? { message: extra.message } : {}) })
     })
     if (options.anchor) coordinator.updateContext(options.anchor)

@@ -56,6 +56,52 @@ beforeEach(() => {
 const JOHN_316 = "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"
 
 describe("QuoteMatcher", () => {
+    // A verse deliberately RETURNED to re-projects. From a live service: Psalm 119:1-6 was read
+    // (projection followed to v6), then v1 was quoted verbatim - and nothing happened, because
+    // the emission ledger was permanent for the session.
+    describe("re-quoting an earlier verse (requote)", () => {
+        const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+
+        it("re-emits a verbatim re-quote once the reading has moved on", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            expect(matcher.onSegment(seg(JOHN_316))[0]).toMatchObject({ verseStart: 16, kind: "fresh" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+
+            expect(matcher.onSegment(seg(V17))[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // 40s later the preacher returns to v16 verbatim - v17 is live, so this is a change
+            const out = matcher.onSegment(seg(JOHN_316, 40_000))
+            expect(out).toHaveLength(1)
+            expect(out[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 16, kind: "requote", confidence: "high" })
+        })
+
+        it("stays quiet while the verse is still the live passage", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+
+            expect(matcher.onSegment(seg(JOHN_316, 40_000))).toHaveLength(0)
+        })
+
+        it("never re-emits on a fragment echo, however late", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // a few of the verse's words in passing preach-back, not a recitation
+            expect(matcher.onSegment(seg("god so loved the world you see", 40_000))).toHaveLength(0)
+        })
+
+        it("holds the same-words echo inside the 30s window", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            expect(matcher.onSegment(seg(JOHN_316, 10_000))).toHaveLength(0)
+        })
+    })
+
     // With 30+ installed near-identical translations, single decisive wins land all over the
     // family and following each one hops the projected version per verse. A different version
     // must win twice in a row before ties start resolving toward it. The fixture pair shares
