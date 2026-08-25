@@ -59,6 +59,9 @@ interface ActiveTracker {
     chapter: number
     verseOrdinal: number // ordinal of the last emitted verse in its translation index
     lastAdvanceMs: number
+    // consecutive in-order advances (v1 -> v2 -> v3...). An established streak is what lets the
+    // next verse advance on its opening words alone - see tryContinuation
+    advanceStreak: number
     // confidence of the emission that armed this tracker: continuations of a HIGH reading stay
     // high (auto-project), continuations of a MEDIUM suggestion stay suggestions
     seedConfidence: "high" | "medium"
@@ -579,7 +582,14 @@ export class QuoteMatcher {
 
         const a = candidate.align
         const informativeOk = a.density >= tuning.CONT_DENSITY && a.coverage >= tuning.CONT_COVERAGE && a.matchedInformative >= tuning.CONT_MIN_INFORMATIVE && a.matchedWeight >= tuning.CONT_MIN_WEIGHT
-        if (!informativeOk && !this.verbatimContinuation(candidate)) return null
+        let accepted = informativeOk || this.verbatimContinuation(candidate)
+        // In an ESTABLISHED reading every verse otherwise lands only near its end, once enough
+        // words accumulated - a full passage read this way trails the reader the whole time.
+        // After two in-order advances the next verse's OPENING is proof enough: a reading always
+        // starts at the verse's first words, and an interjection ("hallelujah, are you seeing
+        // this") cannot produce consecutive tokens matching them in order.
+        if (!accepted && this.tracker.advanceStreak >= tuning.CONT_FAST_STREAK) accepted = this.openingContinuation(candidate)
+        if (!accepted) return null
 
         // the seed confidence carries: a MEDIUM suggestion's relaxed-floor continuations must not
         // chain into auto-projected HIGHs the original evidence never earned
@@ -598,6 +608,18 @@ export class QuoteMatcher {
         const bare = alignQuoteWindow(this.windowQuery(), candidate.index, candidate.ordinal, { ...tuning, SPILL_TOKENS: 0 })
         if (!bare) return false
         return bare.verseFrom <= 1 && bare.verseTo >= bare.verseLength - 2 && bare.density >= tuning.CONT_VERBATIM_DENSITY && bare.coverage >= tuning.CONT_VERBATIM_COVERAGE && bare.matched >= tuning.CONT_VERBATIM_MATCHED
+    }
+
+    /**
+     * The next verse's opening being read right now: a contiguous ordered run anchored at the
+     * verse start, judged spill-free like verbatimContinuation - spill matches from the verse
+     * before would otherwise fake the anchor.
+     */
+    private openingContinuation(candidate: Candidate): boolean {
+        const tuning = this.tuning
+        const bare = alignQuoteWindow(this.windowQuery(), candidate.index, candidate.ordinal, { ...tuning, SPILL_TOKENS: 0 })
+        if (!bare) return false
+        return bare.verseFrom <= 1 && bare.bestRunLength >= tuning.CONT_FAST_RUN
     }
 
     private tryFresh(candidates: Candidate[], nowMs: number): QuoteMatchEmission[] {
@@ -882,12 +904,14 @@ export class QuoteMatcher {
             }
         }
 
+        const sequential = this.tracker && this.tracker.translationId === candidate.index.translationId && this.tracker.book === ref.book && candidate.ordinal === this.tracker.verseOrdinal + 1
         this.tracker = {
             translationId: candidate.index.translationId,
             book: ref.book,
             chapter: candidate.index.chapter[candidate.ordinal],
             verseOrdinal: candidate.ordinal,
             lastAdvanceMs: nowMs,
+            advanceStreak: sequential ? this.tracker!.advanceStreak + 1 : 0,
             seedConfidence: confidence
         }
         this.previousTop = null

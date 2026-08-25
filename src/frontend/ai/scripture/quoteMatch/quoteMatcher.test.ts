@@ -56,6 +56,43 @@ beforeEach(() => {
 const JOHN_316 = "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"
 
 describe("QuoteMatcher", () => {
+    // An established reading advances on the next verse's OPENING instead of trailing the
+    // reader to near the end of every verse - from a live service where a whole passage was
+    // read and each verse only landed as the speaker finished it.
+    describe("reading-streak fast advance", () => {
+        const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+        const V18 = "he that believeth on him is not condemned but he that believeth not is condemned already because he hath not believed in the name of the only begotten son of god"
+
+        it("advances on the opening words once the streak is established", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            expect(matcher.onSegment(seg(JOHN_316))[0]).toMatchObject({ verseStart: 16 })
+            expect(matcher.onSegment(seg(V17))[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+            expect(matcher.onSegment(seg(V18))[0]).toMatchObject({ verseStart: 18, kind: "continuation" })
+
+            // two in-order advances behind us - verse 19's first words alone advance the reading
+            const out = matcher.onSegment(seg("and this is the condemnation"))
+            expect(out).toHaveLength(1)
+            expect(out[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 19, kind: "continuation" })
+        })
+
+        it("does not advance on an opening fragment before the streak exists", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.onSegment(seg(V17)) // streak is 1 - not yet a reading
+
+            expect(matcher.onSegment(seg("he that believeth on him"))).toHaveLength(0)
+        })
+
+        it("does not advance on an interjection mid-reading", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.onSegment(seg(V17))
+            matcher.onSegment(seg(V18))
+
+            expect(matcher.onSegment(seg("hallelujah are you seeing this glory in the room"))).toHaveLength(0)
+        })
+    })
+
     // A verse deliberately RETURNED to re-projects. From a live service: Psalm 119:1-6 was read
     // (projection followed to v6), then v1 was quoted verbatim - and nothing happened, because
     // the emission ledger was permanent for the session.
