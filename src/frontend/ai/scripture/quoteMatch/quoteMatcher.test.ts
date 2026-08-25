@@ -93,6 +93,47 @@ describe("QuoteMatcher", () => {
         })
     })
 
+    // Two verses of one chapter share a distinctive phrase ("about the eleventh hour" lives in
+    // Matthew 20:6 AND 20:9). A preacher read v6, then repeated the phrase for emphasis
+    // ("everybody say: what is the time?") - and the repeats pumped v9 over the sustain bar,
+    // switching the projection to a verse nobody was reading.
+    describe("repeated phrase emphasis of an emitted verse", () => {
+        const MATTHEW20 = [
+            verse(40, 20, 1, "for the kingdom of heaven is like unto a man that is an householder which went out early in the morning to hire labourers into his vineyard"),
+            verse(40, 20, 6, "and about the eleventh hour he went out and found others standing idle and saith unto them why stand ye here all the day idle"),
+            verse(40, 20, 9, "and when they came that were hired about the eleventh hour they received every man a penny"),
+            verse(19, 23, 1, "the lord is my shepherd i shall not want he maketh me to lie down in green pastures"),
+            verse(43, 3, 16, "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"),
+            verse(1, 1, 1, "in the beginning god created the heaven and the earth"),
+            verse(45, 8, 28, "and we know that all things work together for good to them that love god to them that are the called according to his purpose"),
+            verse(23, 40, 31, "but they that wait upon the lord shall renew their strength they shall mount up with wings as eagles")
+        ]
+
+        it("keeps repeats of the phrase from promoting the phrase-mate", () => {
+            const matcher = new QuoteMatcher([buildTranslationIndex("kjv", MATTHEW20)])
+            matcher.setAnchor({ bookNumber: 40, chapter: 20, verseStart: 1, verseEnd: 1 })
+
+            // v6 read - emitted
+            const read = matcher.onSegment(seg("and about the eleventh hour he went out and found others standing idle and saith unto them why stand ye here all the day idle"))
+            expect(read[0]).toMatchObject({ book: 40, chapter: 20, verseStart: 6 })
+
+            // the emphasis: the shared phrase repeated across segments must never surface v9
+            for (const text of ["everybody say what is the time it says about the eleventh hour", "about the eleventh hour which is just almost midnight", "he said about the eleventh hour you hear me"]) {
+                const out = matcher.onSegment(seg(text))
+                expect(out.filter((e) => e.verseStart === 9)).toHaveLength(0)
+            }
+        })
+
+        it("still surfaces the phrase-mate when its own distinct words are read", () => {
+            const matcher = new QuoteMatcher([buildTranslationIndex("kjv", MATTHEW20)])
+            matcher.setAnchor({ bookNumber: 40, chapter: 20, verseStart: 1, verseEnd: 1 })
+
+            matcher.onSegment(seg("and about the eleventh hour he went out and found others standing idle and saith unto them why stand ye here all the day idle"))
+            const out = matcher.onSegment(seg("and when they came that were hired about the eleventh hour they received every man a penny", 30_000))
+            expect(out.filter((e) => e.verseStart === 9)).toHaveLength(1)
+        })
+    })
+
     // A verse deliberately RETURNED to re-projects. From a live service: Psalm 119:1-6 was read
     // (projection followed to v6), then v1 was quoted verbatim - and nothing happened, because
     // the emission ledger was permanent for the session.

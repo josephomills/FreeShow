@@ -689,6 +689,16 @@ export class QuoteMatcher {
         // floors must not be the only way in
         const phrase = phraseEvidence(top.align, tuning)
 
+        // A phrase shared with a verse ALREADY SURFACED is emphasis of that verse, not evidence
+        // for its twin. A preacher read Matthew 20:6, then repeated "about the eleventh hour"
+        // ("everybody say: what is the time?") - the phrase also lives in 20:9, and the repeats
+        // pumped the twin over the sustain bar while 20:6 sat ledgered. Only FULL floors (the
+        // twin's own distinct words actually read) may surface it past an emitted phrase-mate.
+        if (!classify(top.align, tuning)) {
+            const emphasizedPrior = candidates.some((candidate) => candidate !== top && !sameRef(candidate, top) && this.emitted.has(refKey(this.refOf(candidate))) && phraseEvidence(candidate.align, tuning) && candidate.align.bestRunWeight >= top.align.bestRunWeight - tuning.PHRASE_RIVAL_MARGIN)
+            if (emphasizedPrior) return []
+        }
+
         let confidence = classify(top.align, tuning)
         if (!confidence && phrase) {
             // a 3-4 word run is often just conversational collocation ("are going to inherit",
