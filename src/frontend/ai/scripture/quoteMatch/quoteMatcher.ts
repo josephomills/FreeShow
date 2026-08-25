@@ -204,9 +204,11 @@ const SAME_SCOPE_REGEX = /\b(?:in|from) (?:the|this|that) same (psalm|chapter|pa
 // a pending version switch is forgotten after this long - two blips far apart are not a switch
 const PENDING_STICKY_TTL_MS = 3 * 60 * 1000
 
-// how long after a verse's emission a verbatim re-quote of it may re-project it - inside this
-// window the same words are usually the reading's own residue still in the transcript window
-const REQUOTE_AFTER_MS = 30_000
+// a re-quote's evidence must START this long after the verse's previous emission. The original
+// reading's trailing words keep arriving for a few seconds past the emission; anything after
+// this margin is NEW speech - the token timestamps, not a fixed wait, are what separate a
+// deliberate re-read (which may come just seconds later) from the reading's own residue
+const REQUOTE_FRESH_MARGIN_MS = 8_000
 
 export class QuoteMatcher {
     private indexes: TranslationIndex[]
@@ -773,12 +775,15 @@ export class QuoteMatcher {
 
             // A verse deliberately RETURNED to re-projects. A preacher read Psalm 119:1-6, then
             // later quoted v1 verbatim - and nothing happened, because this ledger was permanent.
-            // Three conditions separate a return from an echo: the reading has moved on (the
-            // verse is not the live passage), enough time has passed that the words are not the
-            // reading's own residue still in the window, and the new evidence clears the strong
-            // single-shot bar entirely on its own - a fragment must never yank the output back.
+            // Preaching is cyclical - verses repeat, passages are re-read - so the conditions
+            // separate a return from an echo without adding friction: the reading has moved on
+            // (the verse is not the live passage), the evidence STARTS after the previous
+            // emission's own trailing words (token timestamps, so a re-read seconds later works
+            // while window residue physically cannot fire), and it clears the strong single-shot
+            // bar entirely on its own - a fragment must never yank the output back.
             const strongAlone = top.align.matchedInformative >= tuning.SINGLE_SHOT_INFORMATIVE && top.align.matchedWeight >= tuning.SINGLE_SHOT_WEIGHT && top.align.score >= tuning.EMIT_HIGH
-            if (strongAlone && nowMs - already.atMs >= REQUOTE_AFTER_MS && !this.isLivePassage(top)) {
+            const evidenceFromMs = this.ring[top.align.queryFrom]?.endMs ?? 0
+            if (strongAlone && evidenceFromMs > already.atMs + REQUOTE_FRESH_MARGIN_MS && !this.isLivePassage(top)) {
                 already.atMs = nowMs
                 already.confidence = "high"
                 return [this.emit(top, "high", "requote", nowMs, true, candidates)]

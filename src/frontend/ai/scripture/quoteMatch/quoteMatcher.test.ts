@@ -130,12 +130,61 @@ describe("QuoteMatcher", () => {
             expect(matcher.onSegment(seg("god so loved the world you see", 40_000))).toHaveLength(0)
         })
 
-        it("holds the same-words echo inside the 30s window", () => {
+        it("re-emits a fast re-read seconds later - preaching is cyclical", () => {
+            // "let's look at it again" often comes after a brief explanation, not half a minute
             const matcher = new QuoteMatcher([kjvIndex()])
             matcher.onSegment(seg(JOHN_316))
             matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
 
-            expect(matcher.onSegment(seg(JOHN_316, 10_000))).toHaveLength(0)
+            const out = matcher.onSegment(seg(JOHN_316, 25_000))
+            expect(out).toHaveLength(1)
+            expect(out[0]).toMatchObject({ verseStart: 16, kind: "requote" })
+        })
+
+        it("never fires on the reading's own residue - old tokens cannot requote", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // unrelated speech seconds later: the verse's words are still IN the window, but
+            // their timestamps predate the emission - the alignment cannot present them as new
+            expect(matcher.onSegment(seg("and he explained what this means for the church", 10_000))).toHaveLength(0)
+        })
+
+        it("returns to a previous passage after a detour through another book", () => {
+            // the live pattern: read v1-2, jump to another passage entirely, come back to v1
+            const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.onSegment(seg(V17))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // the detour: another passage goes live (spoken references project without the
+            // quote matcher, exactly like the live "jumps back to Numbers 6" case)
+            matcher.onSegment(seg("the lord is my shepherd i shall not want", 30_000))
+            matcher.setAnchor({ bookNumber: 19, chapter: 23, verseStart: 1, verseEnd: 1 })
+
+            // and the return - the earlier passage re-projects
+            const back = matcher.onSegment(seg(JOHN_316, 30_000))
+            expect(back).toHaveLength(1)
+            expect(back[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 16, kind: "requote" })
+        })
+
+        it("re-walks a re-read passage: requoted v1 chains into v2 as a continuation", () => {
+            const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+            const matcher = new QuoteMatcher([kjvIndex()])
+            expect(matcher.onSegment(seg(JOHN_316))[0]).toMatchObject({ verseStart: 16 })
+            expect(matcher.onSegment(seg(V17))[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // explain, then "let's look at it again" - the re-read walks v16 then v17 again
+            const first = matcher.onSegment(seg(JOHN_316, 30_000))
+            expect(first[0]).toMatchObject({ verseStart: 16, kind: "requote" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+
+            const second = matcher.onSegment(seg(V17))
+            expect(second).toHaveLength(1)
+            expect(second[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
         })
     })
 
