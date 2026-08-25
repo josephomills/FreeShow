@@ -3,6 +3,8 @@
     import { fade, fly } from "svelte/transition"
     import type { DetectedReference } from "../../../types/ai/AiScripture"
     import { getShortBibleName } from "../../components/drawer/bible/scripture"
+    import { getSettings } from "../scripture/scriptureState"
+    import { preferredTranslationId } from "../scripture/translationPreference"
     import T from "../../components/helpers/T.svelte"
     import MaterialButton from "../../components/inputs/MaterialButton.svelte"
     import { activePage, ai, aiQuoteMatchActive, aiScriptureAutoPaused, aiScriptureHasProjected, aiInterim, aiScriptureStatus, aiScriptureSuggestions, aiTranscript, aiStatus, drawerTabsData, language, outLocked, scriptures, settingsTab } from "../../stores"
@@ -172,14 +174,18 @@
 
     $: suggestions = scriptureEnabled ? $aiScriptureSuggestions : []
 
-    // spoken references carry no matchedBibleId (nothing was matched against a text) - the tag
-    // then names the drawer translation, which is what the detection will project in
+    // the tag names the translation this detection will actually project in - the same
+    // resolution projectDetection uses. It used to name the DRAWER translation for spoken
+    // references, which lies whenever a matched-mode quote projection has just moved the
+    // drawer: the cards then all claim the matched translation while the projections go to
+    // the preferred one (or worse, genuinely follow the drawer - see translationPreference)
     $: drawerBibleId = $drawerTabsData.scripture?.activeSubTab || ""
     function getReferenceLabel(suggestion: DetectedReference, _updater: any = null) {
         let label = `${suggestion.book} ${suggestion.chapter}:${suggestion.verseStart}`
         if (suggestion.verseEnd > suggestion.verseStart) label += `-${suggestion.verseEnd}`
 
-        const bibleId = suggestion.matchedBibleId || drawerBibleId
+        const matched = getSettings().displayTranslation === "matched" && suggestion.matchedBibleId ? suggestion.matchedBibleId : ""
+        const bibleId = suggestion.spokenBibleId || matched || preferredTranslationId() || drawerBibleId
         const bible = bibleId ? $scriptures[bibleId] : null
         if (bible) label += ` (${getShortBibleName(bible.customName || bible.name || "")})`
 

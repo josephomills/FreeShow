@@ -5,7 +5,7 @@
 import { get } from "svelte/store"
 import { getShortBibleName } from "../../components/drawer/bible/scripture"
 import { drawerTabsData, scriptures } from "../../stores"
-import { getSettings } from "./scriptureState"
+import { getSettings, scriptureState } from "./scriptureState"
 
 // "another translation" visits the familiar ones first - however the search selection is ordered.
 // Each entry lists the abbreviation AND full-name phrasings, since libraries store either
@@ -47,5 +47,9 @@ export function favoriteTranslationIds(): string[] {
 export function preferredTranslationId(): string {
     const main = getSettings().mainTranslation
     if (main && get(scriptures)[main]) return main
-    return favoriteTranslationIds()[0] || get(drawerTabsData).scripture?.activeSubTab || ""
+    // the SESSION-START drawer choice, never the live tab: the projection follow moves the live
+    // tab, and reading it back here would turn one matched-translation projection into the
+    // target for everything after it
+    const sessionFallback = scriptureState.sessionFallbackTranslationId
+    return favoriteTranslationIds()[0] || (sessionFallback && get(scriptures)[sessionFallback] ? sessionFallback : "") || get(drawerTabsData).scripture?.activeSubTab || ""
 }

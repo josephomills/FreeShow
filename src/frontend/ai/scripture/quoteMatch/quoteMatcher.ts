@@ -79,7 +79,7 @@ const refKey = (r: RefKey) => `${r.book}.${r.chapter}.${r.verseStart}-${r.verseE
 // spoken cues announcing that a quote is coming ("Paul said", "the Bible says", "it is written").
 // a cue only relaxes the SPEED bar (no waiting for a second confirming segment) - the evidence
 // floors are untouched, so a cue can never turn sermon speech into a detection
-const QUOTE_CUE_REGEX = /\b(?:bible|scriptures?|word(?: of god)?|jesus|christ|lord|god|apostle \w+|prophet \w+|paul|peter|john|james|moses|david|isaiah|solomon)\s+(?:says?|said|tells? us|told us|wrote|writes|declares?|reminds? us)\b|\bit is written\b/
+const QUOTE_CUE_REGEX = /\b(?:bible|scriptures?|word(?: of god)?|jesus|christ|lord|god|apostle \w+|prophet \w+|paul|peter|john|james|moses|david|isaiah|solomon)\s+(?:says?|said|tells? us|told us|wrote|writes|declares?|reminds? us)\b|\b(?:lord|god)\s+(?:told|said to|spoke to|commanded)\s+\w+\b|\bit is written\b/
 
 // "some versions say...", "another translation renders it..." - the speaker is announcing a
 // TRANSLATION's wording, the most deliberate quote cue there is. Beyond the speed bar it also

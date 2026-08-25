@@ -26,7 +26,13 @@ export const scriptureState = {
     lastAutoProjectionAt: 0,
     lastAutoProjectedRef: null as DetectedReference | null,
     lastAutoProjectedBibleId: "", // which translation's wording is on the output right now
-    lastQuoteMatchAnchor: null as { bookNumber: number; chapter: number; verseStart: number; verseEnd: number } | null
+    lastQuoteMatchAnchor: null as { bookNumber: number; chapter: number; verseStart: number; verseEnd: number } | null,
+    // the drawer translation as the session STARTED - the last-resort projection target when no
+    // main translation and no favourites are configured. The live drawer tab must never be that
+    // fallback: our own projection follow moves the drawer, so one matched-mode projection in
+    // another translation would drag every later spoken reference to it (seen live: a single WEB
+    // quote match turned a whole reading's "verse N" projections into WEB, uncalled for)
+    sessionFallbackTranslationId: ""
 }
 
 export function getSettings() {
