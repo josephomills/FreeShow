@@ -180,4 +180,3 @@ export async function exportProject(project: Project, projectId: string, savePat
     // let base64 = await toDataURL(showRef.id)
     // media[showRef.id] = base64
 }
-

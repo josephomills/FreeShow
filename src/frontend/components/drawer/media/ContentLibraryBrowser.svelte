@@ -151,11 +151,7 @@
             {#each filteredContent as item}
                 {@const category = getContentCategory(item)}
                 {#if category}
-                    <button
-                        class="category-card"
-                        style="width: {cardWidth};"
-                        on:click={() => navigateToCategory(category)}
-                    >
+                    <button class="category-card" style="width: {cardWidth};" on:click={() => navigateToCategory(category)}>
                         {#if item.thumbnail}
                             <img src={item.thumbnail} alt={item.name} />
                         {:else}

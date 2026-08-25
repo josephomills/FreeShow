@@ -211,7 +211,7 @@
             // Dynamically reserve inline horizontal space per trailing chord with generous spacing
             chords.forEach((chord) => {
                 html += `<span class="chord end" data-autosize-ratio="${autosizeRatio}">${chord.key}</span>`
-                const widthEm = Math.max(1.5, (chord.key.length * 0.65 * autosizeRatio) + 0.8).toFixed(2)
+                const widthEm = Math.max(1.5, chord.key.length * 0.65 * autosizeRatio + 0.8).toFixed(2)
                 html += `<span class="invisible trailing-space" style="display: inline-block; width: ${widthEm}em; white-space: nowrap;"></span>`
             })
 

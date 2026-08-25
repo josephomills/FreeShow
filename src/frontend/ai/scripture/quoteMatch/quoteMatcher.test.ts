@@ -56,6 +56,245 @@ beforeEach(() => {
 const JOHN_316 = "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"
 
 describe("QuoteMatcher", () => {
+    // An established reading advances on the next verse's OPENING instead of trailing the
+    // reader to near the end of every verse - from a live service where a whole passage was
+    // read and each verse only landed as the speaker finished it.
+    describe("reading-streak fast advance", () => {
+        const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+        const V18 = "he that believeth on him is not condemned but he that believeth not is condemned already because he hath not believed in the name of the only begotten son of god"
+
+        it("advances on the opening words once the streak is established", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            expect(matcher.onSegment(seg(JOHN_316))[0]).toMatchObject({ verseStart: 16 })
+            expect(matcher.onSegment(seg(V17))[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+            expect(matcher.onSegment(seg(V18))[0]).toMatchObject({ verseStart: 18, kind: "continuation" })
+
+            // two in-order advances behind us - verse 19's first words alone advance the reading
+            const out = matcher.onSegment(seg("and this is the condemnation"))
+            expect(out).toHaveLength(1)
+            expect(out[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 19, kind: "continuation" })
+        })
+
+        it("does not advance on an opening fragment before the streak exists", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.onSegment(seg(V17)) // streak is 1 - not yet a reading
+
+            expect(matcher.onSegment(seg("he that believeth on him"))).toHaveLength(0)
+        })
+
+        it("does not advance on an interjection mid-reading", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.onSegment(seg(V17))
+            matcher.onSegment(seg(V18))
+
+            expect(matcher.onSegment(seg("hallelujah are you seeing this glory in the room"))).toHaveLength(0)
+        })
+    })
+
+    // For the SAME verse, span-relative score gaps between translations are length/idf
+    // artifacts: a shorter verse scores higher on identical matched words. A preacher jumping
+    // to another verse is overwhelmingly still reading the same bible - the reading translation
+    // keeps the emission unless the wording genuinely lives elsewhere.
+    it("keeps a same-verse match in the reading translation despite a shorter rival verse", () => {
+        const kjv = [verse(40, 20, 9, "and when they came that were hired about the eleventh hour they received every man a penny"), verse(43, 3, 16, "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"), verse(1, 1, 1, "in the beginning god created the heaven and the earth"), verse(19, 23, 1, "the lord is my shepherd i shall not want")]
+        // same verse, much shorter wording built from the same key tokens - its span-relative
+        // score flatters any shared fragment
+        const terse = [verse(40, 20, 9, "those hired about the eleventh hour received a penny"), verse(43, 3, 16, "god loved the world so much he gave his only son so believers never perish but live forever"), verse(1, 1, 1, "first god created sky and earth"), verse(19, 23, 1, "the lord shepherds me i lack nothing")]
+        const pad = [
+            verse(40, 5, 3, "blessed are the poor in spirit for theirs is the kingdom of heaven"),
+            verse(40, 5, 4, "blessed are they that mourn for they shall be comforted"),
+            verse(45, 8, 28, "and we know that all things work together for good to them that love god"),
+            verse(45, 12, 1, "i beseech you therefore brethren by the mercies of god that ye present your bodies a living sacrifice"),
+            verse(66, 21, 4, "and god shall wipe away all tears from their eyes and there shall be no more death"),
+            verse(23, 40, 31, "but they that wait upon the lord shall renew their strength they shall mount up with wings as eagles"),
+            verse(50, 4, 13, "i can do all things through christ which strengtheneth me"),
+            verse(43, 14, 6, "jesus saith unto him i am the way the truth and the life no man cometh unto the father but by me")
+        ]
+        const matcher = new QuoteMatcher([buildTranslationIndex("kjv", [...kjv, ...pad]), buildTranslationIndex("terse", [...terse, ...pad])])
+
+        const out = matcher.onSegment(seg("the bible says hired about the eleventh hour and received every man a penny"))
+        expect(out).toHaveLength(1)
+        expect(out[0]).toMatchObject({ book: 40, chapter: 20, verseStart: 9, translationId: "kjv" })
+    })
+
+    // Two verses of one chapter share a distinctive phrase ("about the eleventh hour" lives in
+    // Matthew 20:6 AND 20:9). A preacher read v6, then repeated the phrase for emphasis
+    // ("everybody say: what is the time?") - and the repeats pumped v9 over the sustain bar,
+    // switching the projection to a verse nobody was reading.
+    describe("repeated phrase emphasis of an emitted verse", () => {
+        const MATTHEW20 = [
+            verse(40, 20, 1, "for the kingdom of heaven is like unto a man that is an householder which went out early in the morning to hire labourers into his vineyard"),
+            verse(40, 20, 6, "and about the eleventh hour he went out and found others standing idle and saith unto them why stand ye here all the day idle"),
+            verse(40, 20, 9, "and when they came that were hired about the eleventh hour they received every man a penny"),
+            verse(19, 23, 1, "the lord is my shepherd i shall not want he maketh me to lie down in green pastures"),
+            verse(43, 3, 16, "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"),
+            verse(1, 1, 1, "in the beginning god created the heaven and the earth"),
+            verse(45, 8, 28, "and we know that all things work together for good to them that love god to them that are the called according to his purpose"),
+            verse(23, 40, 31, "but they that wait upon the lord shall renew their strength they shall mount up with wings as eagles")
+        ]
+
+        it("keeps repeats of the phrase from promoting the phrase-mate", () => {
+            const matcher = new QuoteMatcher([buildTranslationIndex("kjv", MATTHEW20)])
+            matcher.setAnchor({ bookNumber: 40, chapter: 20, verseStart: 1, verseEnd: 1 })
+
+            // v6 read - emitted
+            const read = matcher.onSegment(seg("and about the eleventh hour he went out and found others standing idle and saith unto them why stand ye here all the day idle"))
+            expect(read[0]).toMatchObject({ book: 40, chapter: 20, verseStart: 6 })
+
+            // the emphasis: the shared phrase repeated across segments must never surface v9
+            for (const text of ["everybody say what is the time it says about the eleventh hour", "about the eleventh hour which is just almost midnight", "he said about the eleventh hour you hear me"]) {
+                const out = matcher.onSegment(seg(text))
+                expect(out.filter((e) => e.verseStart === 9)).toHaveLength(0)
+            }
+        })
+
+        it("still surfaces the phrase-mate when its own distinct words are read", () => {
+            const matcher = new QuoteMatcher([buildTranslationIndex("kjv", MATTHEW20)])
+            matcher.setAnchor({ bookNumber: 40, chapter: 20, verseStart: 1, verseEnd: 1 })
+
+            matcher.onSegment(seg("and about the eleventh hour he went out and found others standing idle and saith unto them why stand ye here all the day idle"))
+            const out = matcher.onSegment(seg("and when they came that were hired about the eleventh hour they received every man a penny", 30_000))
+            expect(out.filter((e) => e.verseStart === 9)).toHaveLength(1)
+        })
+    })
+
+    // A verse deliberately RETURNED to re-projects. From a live service: Psalm 119:1-6 was read
+    // (projection followed to v6), then v1 was quoted verbatim - and nothing happened, because
+    // the emission ledger was permanent for the session.
+    describe("re-quoting an earlier verse (requote)", () => {
+        const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+
+        it("re-emits a verbatim re-quote once the reading has moved on", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            expect(matcher.onSegment(seg(JOHN_316))[0]).toMatchObject({ verseStart: 16, kind: "fresh" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+
+            expect(matcher.onSegment(seg(V17))[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // 40s later the preacher returns to v16 verbatim - v17 is live, so this is a change
+            const out = matcher.onSegment(seg(JOHN_316, 40_000))
+            expect(out).toHaveLength(1)
+            expect(out[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 16, kind: "requote", confidence: "high" })
+        })
+
+        it("stays quiet while the verse is still the live passage", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+
+            expect(matcher.onSegment(seg(JOHN_316, 40_000))).toHaveLength(0)
+        })
+
+        it("never re-emits on a fragment echo, however late", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // a few of the verse's words in passing preach-back, not a recitation
+            expect(matcher.onSegment(seg("god so loved the world you see", 40_000))).toHaveLength(0)
+        })
+
+        it("re-emits a fast re-read seconds later - preaching is cyclical", () => {
+            // "let's look at it again" often comes after a brief explanation, not half a minute
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            const out = matcher.onSegment(seg(JOHN_316, 25_000))
+            expect(out).toHaveLength(1)
+            expect(out[0]).toMatchObject({ verseStart: 16, kind: "requote" })
+        })
+
+        it("never fires on the reading's own residue - old tokens cannot requote", () => {
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // unrelated speech seconds later: the verse's words are still IN the window, but
+            // their timestamps predate the emission - the alignment cannot present them as new
+            expect(matcher.onSegment(seg("and he explained what this means for the church", 10_000))).toHaveLength(0)
+        })
+
+        it("returns to a previous passage after a detour through another book", () => {
+            // the live pattern: read v1-2, jump to another passage entirely, come back to v1
+            const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+            const matcher = new QuoteMatcher([kjvIndex()])
+            matcher.onSegment(seg(JOHN_316))
+            matcher.onSegment(seg(V17))
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // the detour: another passage goes live (spoken references project without the
+            // quote matcher, exactly like the live "jumps back to Numbers 6" case)
+            matcher.onSegment(seg("the lord is my shepherd i shall not want", 30_000))
+            matcher.setAnchor({ bookNumber: 19, chapter: 23, verseStart: 1, verseEnd: 1 })
+
+            // and the return - the earlier passage re-projects
+            const back = matcher.onSegment(seg(JOHN_316, 30_000))
+            expect(back).toHaveLength(1)
+            expect(back[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 16, kind: "requote" })
+        })
+
+        it("re-walks a re-read passage: requoted v1 chains into v2 as a continuation", () => {
+            const V17 = "for god sent not his son into the world to condemn the world but that the world through him might be saved"
+            const matcher = new QuoteMatcher([kjvIndex()])
+            expect(matcher.onSegment(seg(JOHN_316))[0]).toMatchObject({ verseStart: 16 })
+            expect(matcher.onSegment(seg(V17))[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 17, verseEnd: 17 })
+
+            // explain, then "let's look at it again" - the re-read walks v16 then v17 again
+            const first = matcher.onSegment(seg(JOHN_316, 30_000))
+            expect(first[0]).toMatchObject({ verseStart: 16, kind: "requote" })
+            matcher.setAnchor({ bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+
+            const second = matcher.onSegment(seg(V17))
+            expect(second).toHaveLength(1)
+            expect(second[0]).toMatchObject({ verseStart: 17, kind: "continuation" })
+        })
+    })
+
+    // With 30+ installed near-identical translations, single decisive wins land all over the
+    // family and following each one hops the projected version per verse. A different version
+    // must win twice in a row before ties start resolving toward it. The fixture pair shares
+    // identical wording for the tie verses (as real translation families do) and diverges
+    // completely on the others, so wins there are decisive.
+    it("moves the tie-preferred translation only after two consecutive off-translation wins", () => {
+        const tieVerse1 = "the lord is my shepherd i shall not want he maketh me to lie down in green pastures"
+        const tieVerse2 = "and we know that all things work together for good to them that love god"
+        const homeA = [verse(19, 23, 1, tieVerse1), verse(45, 8, 28, tieVerse2), verse(43, 3, 16, "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish"), verse(50, 4, 13, "i can do all things through christ which strengtheneth me")]
+        const otherB = [verse(19, 23, 1, tieVerse1), verse(45, 8, 28, tieVerse2), verse(43, 3, 16, "because god treasured the planet deeply he offered his single cherished child so each person trusting him escapes ruin"), verse(50, 4, 13, "every challenge can be handled through the one who supplies my strength and courage")]
+        const filler = [
+            verse(1, 1, 1, "in the beginning god created the heaven and the earth"),
+            verse(1, 1, 2, "and the earth was without form and void and darkness was upon the face of the deep"),
+            verse(40, 5, 3, "blessed are the poor in spirit for theirs is the kingdom of heaven"),
+            verse(40, 5, 4, "blessed are they that mourn for they shall be comforted"),
+            verse(40, 5, 5, "blessed are the meek for they shall inherit the earth"),
+            verse(66, 21, 4, "and god shall wipe away all tears from their eyes and there shall be no more death"),
+            verse(23, 40, 31, "but they that wait upon the lord shall renew their strength they shall mount up with wings as eagles"),
+            verse(45, 12, 1, "i beseech you therefore brethren by the mercies of god that ye present your bodies a living sacrifice"),
+            verse(45, 12, 2, "and be not conformed to this world but be ye transformed by the renewing of your mind"),
+            verse(43, 14, 6, "jesus saith unto him i am the way the truth and the life no man cometh unto the father but by me")
+        ]
+        const matcher = new QuoteMatcher([buildTranslationIndex("homeA", [...homeA, ...filler]), buildTranslationIndex("otherB", [...otherB, ...filler])])
+
+        // one decisive win in the other translation's wording...
+        const first = matcher.onSegment(seg("because god treasured the planet deeply he offered his single cherished child so each person trusting him escapes ruin"))
+        expect(first[0]).toMatchObject({ book: 43, chapter: 3, verseStart: 16, translationId: "otherB" })
+
+        // ...does not hand it the tie-break: identical wording still resolves to the home translation
+        const tied = matcher.onSegment(seg(tieVerse1, 60000))
+        expect(tied[0]).toMatchObject({ book: 19, chapter: 23, verseStart: 1, translationId: "homeA" })
+
+        // a SECOND consecutive decisive win does move it - the reading really switched
+        const second = matcher.onSegment(seg("every challenge can be handled through the one who supplies my strength and courage", 60000))
+        expect(second[0]).toMatchObject({ book: 50, chapter: 4, verseStart: 13, translationId: "otherB" })
+
+        const tiedAfter = matcher.onSegment(seg(tieVerse2, 60000))
+        expect(tiedAfter[0]).toMatchObject({ book: 45, chapter: 8, verseStart: 28, translationId: "otherB" })
+    })
+
     it("emits a full recitation from a single utterance", () => {
         const matcher = new QuoteMatcher([kjvIndex()])
         const out = matcher.onSegment(seg(JOHN_316))

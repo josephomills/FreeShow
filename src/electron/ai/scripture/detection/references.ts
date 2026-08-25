@@ -1,4 +1,4 @@
-import type { AiScriptureBook } from "../../../../types/ai/AiScripture"
+import type { AiScriptureBook, AiScriptureTranslation } from "../../../../types/ai/AiScripture"
 import { HOMOPHONE_ALT, normalizeSpokenNumbers, parseNumberToken } from "../../commands/spokenNumbers"
 import { maxVerseInChapter } from "../chapterVerseCounts"
 import { VERSE_WORD } from "../vocabulary"
@@ -17,6 +17,13 @@ export interface BookIndex {
     bookPattern: string // alternation of all book name patterns ("" when no books)
     bookWords: string[] // distinct book-name words long enough for mishearing recovery
     allBookWords: string[] // distinct book-name words >= 4 chars, for the stutter collapse
+    // a translation name spoken right after a reference ("one samuel ten and five, good news"):
+    // anchored tail regex over the installed translations' spoken names, and name -> bible id
+    translationTailRegex: RegExp | null
+    translationByToken: Map<string, string>
+    // digit-read chapters above 99 ("psalm one one nine" -> 119), built only from books that
+    // have such chapters - see coalesceDigitReadChapters
+    digitChapterRegex: RegExp | null
 }
 
 // a spoken "8 18" often reaches us as "818". Recover the pair when the number cannot be a chapter of this book,
@@ -42,7 +49,7 @@ function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-export function buildBookIndex(books: AiScriptureBook[]): BookIndex {
+export function buildBookIndex(books: AiScriptureBook[], translations: AiScriptureTranslation[] = []): BookIndex {
     const byToken = new Map<string, { name: string; number: number; chapterCount: number; requireVerse?: boolean }>()
     const tokens: string[] = []
 
@@ -133,7 +140,27 @@ export function buildBookIndex(books: AiScriptureBook[]): BookIndex {
     const allBookWords = new Set<string>()
     for (const token of tokens) for (const word of token.split(" ")) if (word.length >= 4) allBookWords.add(word)
 
-    return { regex, chapterFirstRegex, verseFirstRegex, psalmOrdinalRegex, singleChapterVerseRegex, byToken, bookPattern: patterns.join("|"), bookWords: Array.from(bookWords), allBookWords: Array.from(allBookWords) }
+    // Longest name first, so "new king james" can never resolve as "king james". One optional
+    // filler word may sit between the numbers and the name ("...and five, guys, Good News") -
+    // engines drop and invent small words constantly, and a version name following a reference
+    // is already so specific that one stray token does not make it narration.
+    const translationByToken = new Map<string, string>()
+    for (const translation of translations) {
+        for (const name of translation.names || []) {
+            const token = name.trim().toLowerCase().replace(/\s+/g, " ")
+            if (token && !translationByToken.has(token)) translationByToken.set(token, translation.id)
+        }
+    }
+    const translationNames = [...translationByToken.keys()].sort((a, b) => b.length - a.length).map((token) => escapeRegex(token).replace(/ /g, "\\s+"))
+    const translationTailRegex = translationNames.length ? new RegExp("^\\s*[,.]?\\s*(?:in\\s+|from\\s+)?(?:the\\s+)?(?:[a-z']+\\s+)?(?<name>" + translationNames.join("|") + ")\\b") : null
+
+    // chapters above 99 are commonly read digit by digit: "Psalm one one nine" is 119. Only a
+    // book that HAS such chapters can mean that (Psalms alone in the canon), so the rewrite is
+    // built solely from those book tokens - "john 1 1 9" is left exactly as spoken
+    const bigChapterTokens = tokens.filter((token) => (byToken.get(token)?.chapterCount || 0) > 99)
+    const digitChapterRegex = bigChapterTokens.length ? new RegExp("(?<lead>(?:^|[^a-z0-9])(?<book>" + bigChapterTokens.map((token) => escapeRegex(token).replace(/ /g, "\\s+")).join("|") + ")[,.]?\\s+(?:chapter\\s+(?:number\\s+)?)?)1\\s+(?:(?<a>\\d)\\s+(?<b>\\d)|(?<ab>\\d\\d))\\b(?!\\s*:)", "g") : null
+
+    return { regex, chapterFirstRegex, verseFirstRegex, psalmOrdinalRegex, singleChapterVerseRegex, byToken, bookPattern: patterns.join("|"), bookWords: Array.from(bookWords), allBookWords: Array.from(allBookWords), translationTailRegex, translationByToken, digitChapterRegex }
 }
 
 interface ReferenceMatch {
@@ -144,6 +171,20 @@ interface ReferenceMatch {
     verseEnd: number
     confidence: "high" | "medium" | "low"
     quote: string
+    /**
+     * No verse was spoken - verseStart is the default of 1, not something the speaker said. "Turn
+     * to Ephesians chapter 2" is a complete reference right up until "verse 8" arrives.
+     */
+    bareChapter: boolean
+    /**
+     * Nothing but whitespace follows this match in the text it was found in, so the reference may
+     * still be being spoken - "matthew 6" is a complete reference to Matthew 6:1 right up until
+     * "33" arrives. Computed here rather than by the caller because the offsets belong to the
+     * NORMALIZED text, which only this function has.
+     */
+    tailAnchored: boolean
+    /** A translation named right after the reference ("...ten and five, good news") - its bible id. */
+    spokenBibleId?: string
 }
 
 // named groups shared by every reference regex: book, cA/cB/cC (chapter routes),
@@ -166,10 +207,47 @@ interface ReferenceGroups {
     e4?: string
 }
 
+/**
+ * Chapters above 99 are commonly read digit by digit: "Psalm one one nine" is Psalm 119, and
+ * "Psalm one nineteen" the same. After number normalization those arrive as "psalm 1 1 9" and
+ * "psalm 1 19", which the grammar reads as Psalm 1:1 and Psalm 1:19 - the second of which does
+ * not even exist (Psalm 1 has 6 verses). From a live service where exactly this made a spoken
+ * "Psalm one one nine ... verse one" trigger nothing at all.
+ *
+ * Only a book that HAS chapters above 99 can mean this (Psalms alone in the canon), so the
+ * regex is built solely from those book tokens. Two spoken shapes:
+ *   "1 d d"  (three digits read out) - coalesced whenever the result is a real chapter
+ *   "1 dd"   ("one nineteen")        - coalesced only when the literal chapter:verse reading
+ *            is impossible by verse bounds, so "psalm 1 3" stays Psalm 1:3
+ */
+function coalesceDigitReadChapters(text: string, index: BookIndex): string {
+    if (!index.digitChapterRegex) return text
+
+    index.digitChapterRegex.lastIndex = 0
+    return text.replace(index.digitChapterRegex, (whole, ...args) => {
+        const groups = args[args.length - 1] as { lead: string; book: string; a?: string; b?: string; ab?: string }
+        const book = index.byToken.get(groups.book.replace(/\s+/g, " "))
+        if (!book) return whole
+
+        const coalesced = parseInt("1" + (groups.ab ?? groups.a! + groups.b!), 10)
+        if (coalesced > book.chapterCount) return whole
+
+        // "1 19" can be a real chapter-and-verse ("psalm 1 3") - only an impossible verse tips
+        // the reading to a digit-read chapter. "1 d d" has no plausible literal reading at all
+        if (groups.ab !== undefined) {
+            const literalVerse = parseInt(groups.ab, 10)
+            const chapterOneLength = maxVerseInChapter(book.number, 1)
+            if (chapterOneLength > 0 && literalVerse <= chapterOneLength) return whole
+        }
+
+        return groups.lead + String(coalesced)
+    })
+}
+
 export function matchReferences(text: string, index: BookIndex): ReferenceMatch[] {
     if (!index.regex) return []
 
-    const normalized = correctBookMishearings(collapseStutteredBookNames(normalizeSpokenNumbers(text), index.allBookWords), index.bookWords)
+    const normalized = coalesceDigitReadChapters(correctBookMishearings(collapseStutteredBookNames(normalizeSpokenNumbers(text), index.allBookWords), index.bookWords), index)
     const results: ReferenceMatch[] = []
 
     // the specific spoken forms scan first - their spans are excluded from the general book-first
@@ -187,7 +265,14 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         if (!(chapter >= 1) && options.verseOverride !== undefined && book.chapterCount === 1) chapter = 1
         if (!(chapter >= 1)) return
 
-        const verseRaw = options.verseOverride ?? groups.v1 ?? groups.v2 ?? groups.v3 ?? groups.v4 ?? (groups.imp !== undefined ? groups.v5 : undefined)
+        // a translation named right after the numbers ("...ten and five, good news") is deliberate
+        // reference intent: it cues the match, unlocks the bare "and N" verse reading exactly like
+        // a spoken imperative does, and picks the translation the projection should use
+        const matchEndOffset = match.index + match[0].length
+        const translationTail = index.translationTailRegex?.exec(normalized.slice(matchEndOffset))
+        const spokenBibleId = translationTail ? index.translationByToken.get((translationTail.groups?.name || "").replace(/\s+/g, " ")) : undefined
+
+        const verseRaw = options.verseOverride ?? groups.v1 ?? groups.v2 ?? groups.v3 ?? groups.v4 ?? (groups.imp !== undefined || spokenBibleId !== undefined ? groups.v5 : undefined)
         const hasVerse = verseRaw !== undefined
         let verseStart = 1
         let verseEnd = 1
@@ -212,6 +297,15 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         // an ordinary-English alias ("look", "dude") only counts inside a full reference
         if (book.requireVerse && !hasVerse && !unglued) return
 
+        // Numbers is an ordinary English word before it is a book, and the commonest way a
+        // preacher enumerates - so it only counts inside a CUED reference, the same treatment
+        // book.requireVerse gives aliases like "look" and "dude". Both failing forms came from real
+        // sermon audio: "verse number twelve" meaning verse 12 of the open passage, and "number
+        // one, two, three" meaning nothing at all, from a preacher whose messages are numbered
+        // lists and who therefore counts aloud constantly. A bare "Numbers 12" is given up with
+        // it; "number 12" is said far more often than the book is named without a cue.
+        if (/\bnumbers?$/.test(bookToken) && !/\bchapter\b|\bverses?\b|\d:\d/.test(match[0])) return
+
         // verse bounds (from AlloDel's #3): a verse the chapter does not have is a misheard
         // number, not a reference - drop it rather than project the wrong text. A range that
         // overruns is clamped, because its start is real. Non-canon books (chapterCount 0)
@@ -230,14 +324,20 @@ export function matchReferences(text: string, index: BookIndex): ReferenceMatch[
         // book prefix ("first john"/"1 john") or a digit:digit shape ("3:16"). normalizeSpokenNumbers() never introduces any
         // of these words (its digit ordinals land only where the shape already carried the cue), so checking the
         // normalized snippet reflects the original text.
-        const hasCue = options.alwaysCued || /\bchapter\b|\bverses?\b/.test(quote) || /\d:\d/.test(quote) || /^[1-3]\b/.test(bookToken)
+        const hasCue = options.alwaysCued || spokenBibleId !== undefined || /\bchapter\b|\bverses?\b/.test(quote) || /\d:\d/.test(quote) || /^[1-3]\b/.test(bookToken)
 
         // book + chapter + verse ("matthew 12 4"), the same pair run together ("deuteronomy 818") or a cued
         // chapter ("turn to matthew chapter 5") is deliberate spoken intent - "high" so auto mode projects it.
         // only a bare "bookname 15" ("he acts 15 years old") stays "medium" and waits for confirmation
         const confidence: "high" | "medium" | "low" = hasVerse || unglued || hasCue ? "high" : "medium"
 
-        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote })
+        // a named translation terminates the reference - with the verse spoken there is nothing
+        // left to wait for, so the provisional hold must not delay a complete reference
+        const fullyTerminated = spokenBibleId !== undefined && (hasVerse || unglued)
+        const spokenQuote = translationTail ? quote + translationTail[0].replace(/\s+/g, " ").replace(/\s+$/, "") : quote
+
+        const matchEnd = match.index + match[0].length
+        results.push({ bookNumber: book.number, book: book.name, chapter, verseStart, verseEnd, confidence, quote: spokenQuote, bareChapter: !hasVerse && !unglued, tailAnchored: !fullyTerminated && !normalized.slice(matchEnd).trim(), spokenBibleId })
         if (options.claimSpan) claimedSpans.push({ from: match.index, to: match.index + match[0].length })
     }
 

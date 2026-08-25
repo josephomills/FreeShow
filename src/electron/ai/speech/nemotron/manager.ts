@@ -1,7 +1,8 @@
 import { app } from "electron"
 import fs from "fs"
 import path from "path"
-import { NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE } from "../../setup/models/nemotron"
+import { NEMOTRON_MODEL_FILES, NEMOTRON_VAD_FILE } from "../../setup/models/nemotronFiles"
+import { isStampValid, verifyModel, type ModelIntegrity } from "./integrity"
 
 export interface NemotronModelPaths {
     encoder: string
@@ -66,6 +67,23 @@ export function getNemotronModelPaths(): NemotronModelPaths | null {
 export function getVadModelPath(): string | null {
     const file = path.join(getModelDir(), NEMOTRON_VAD_FILE)
     return isUsableFile(file) ? file : null
+}
+
+/**
+ * Whether the model on disk is the one this build pins. Hashes on the first call after a download
+ * or an upgrade (~1.7s for 662 MB) and is instant afterwards - see integrity.ts.
+ *
+ * Kept separate from getNemotronModelPaths() because they answer different questions: that one asks
+ * whether anything is there, this one asks whether it is the right thing. Loading a superseded
+ * model is silent - it still transcribes, just not as the code was measured against.
+ */
+export async function getNemotronModelIntegrity(): Promise<ModelIntegrity> {
+    return verifyModel(getModelDir())
+}
+
+/** The cheap form: true only when a previous verification still holds. Never hashes. */
+export function isNemotronModelVerified(): boolean {
+    return isStampValid(getModelDir())
 }
 
 /** The native addon is optional - report whether this platform can actually run it. */

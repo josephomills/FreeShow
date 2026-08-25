@@ -1,14 +1,20 @@
+import { app } from "electron"
 import { existsSync } from "fs"
+import path from "path"
 import type { SttEngineOptions } from "../../../types/ai/AiSettings"
 import { ToMain } from "../../../types/IPC/ToMain"
 import { sendToMain } from "../../IPC/main"
-import { getNemotronModelPaths, getVadModelPath, isNemotronSupported } from "../speech/nemotron/manager"
+import { getNemotronModelIntegrity, getNemotronModelPaths, getVadModelPath, isNemotronSupported } from "../speech/nemotron/manager"
 import { isModelReady, resolveWhisper } from "../speech/whisper/manager"
 import type { TranscriberSegment } from "../speech/types"
+import { SessionAudioRecorder } from "./audioRecorder"
 import { NemotronTranscriber } from "./transcribers/NemotronTranscriber"
 import { WhisperTranscriber } from "./transcribers/WhisperTranscriber"
 
 type SttEngine = WhisperTranscriber | NemotronTranscriber
+
+// the renderer pushes ~10 times a second - a 2s hole is a dead capture, not scheduling jitter
+const AUDIO_GAP_WARN_MS = 2000
 type SegmentListener = (segment: TranscriberSegment) => void
 
 export class SpeechToText {
@@ -17,10 +23,16 @@ export class SpeechToText {
     static sessionToken = 0
     // features (e.g. scripture detection) subscribe to the transcript stream while their toggle is on
     private static segmentListeners: Set<SegmentListener> = new Set()
+    // opt-in diagnostic: keeps exactly what the engine heard, so a fault reported from a live
+    // service can be reproduced instead of guessed at - see audioRecorder.ts
+    private static recorder = new SessionAudioRecorder()
+    private static lastAudioAt = 0
 
     static async listen(engine: string, options: SttEngineOptions): Promise<{ started: boolean; error?: string }> {
         this.stopInternal(false)
         const token = ++this.sessionToken
+
+        if (options.recordSessionAudio) this.recorder.start(path.join(app.getPath("userData"), "bin", "bench", "sessions"), Date.now())
 
         const created = await this.createEngine(engine, options)
         if ("error" in created) return { started: false, error: created.error }
@@ -32,6 +44,7 @@ export class SpeechToText {
         }
 
         this.transcriberEngine = created.transcriber
+        this.lastAudioAt = 0
 
         try {
             await this.transcriberEngine.start()
@@ -55,10 +68,13 @@ export class SpeechToText {
     private static stopInternal(emitStatus: boolean) {
         this.sessionToken++
 
+        // the recorder can outlive the engine - a failed start or a stop that lands while the
+        // engine is still being created must not leave it recording (and its header unpatched)
+        this.recorder.stop()
+
         const active = this.transcriberEngine
         this.transcriberEngine = null
         if (!active) return
-
         Promise.resolve(active.stop()).catch((err) => console.error("Error stopping STT engine:", err))
         // whatever interim tail was showing is dead now - a crashed/killed worker never gets to
         // clear it itself, so the authoritative clear lives here on every engine stop
@@ -68,6 +84,17 @@ export class SpeechToText {
 
     // audio arriving before START or after STOP is a safe no-op: the engine is null outside a session
     static pushAudio(buffer: Uint8Array) {
+        // The capture side can die silently: a live session's recording came up 2.5 minutes short
+        // of its wall-clock span with no error anywhere, and the missing stretches took a reported
+        // failure with them. The engine cannot tell a quiet room from a dead microphone - this can,
+        // and a decode seam across such a gap is exactly where mangled commits come from.
+        const now = Date.now()
+        if (this.transcriberEngine && this.lastAudioAt && now - this.lastAudioAt > AUDIO_GAP_WARN_MS) {
+            console.warn(`[ai] audio capture gapped for ${((now - this.lastAudioAt) / 1000).toFixed(1)}s - the transcript has a hole and the seam may decode wrong`)
+        }
+        this.lastAudioAt = now
+
+        this.recorder.write(buffer)
         this.transcriberEngine?.pushAudio(buffer)
     }
 
@@ -104,6 +131,14 @@ export class SpeechToText {
             const nemotron = getNemotronModelPaths()
             const vadModelPath = getVadModelPath()
             if (!nemotron || !vadModelPath) return { error: "nemotron_model_missing" }
+
+            // present is not the same as correct: a model from an earlier pinned revision still
+            // transcribes, so nothing about it looks wrong, but it is not the model this build was
+            // written and measured against. First call after a download hashes ~662 MB (~1.7s),
+            // every call after that reads a stamp.
+            const integrity = await getNemotronModelIntegrity()
+            if (integrity === "missing") return { error: "nemotron_model_missing" }
+            if (integrity === "outdated") return { error: "nemotron_model_outdated" }
 
             return { transcriber: new NemotronTranscriber({ ...options, nemotron, vadModelPath }, onSegment, onError, this.onInterim.bind(this)) }
         }

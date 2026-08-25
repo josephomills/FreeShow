@@ -1,6 +1,7 @@
 import path from "path"
 import type { SttEngineOptions } from "../../../../types/ai/AiSettings"
 import { NemotronDriver } from "../../speech/nemotron/driver"
+import { NemotronStreamDriver } from "../../speech/nemotron/streamDriver"
 import type { NemotronModelPaths } from "../../speech/nemotron/manager"
 import type { NemotronWorkerRequest, NemotronWorkerResponse } from "../../speech/nemotron/worker"
 import type { TranscriberSegment } from "../../speech/types"
@@ -31,7 +32,7 @@ export class NemotronTranscriber {
     private onInterim?: (text: string) => void
 
     private child: Electron.UtilityProcess | null = null
-    private fallback: NemotronDriver | null = null
+    private fallback: NemotronDriver | NemotronStreamDriver | null = null
     private stopped = false
 
     private readyResolve: ((ok: boolean) => void) | null = null
@@ -55,14 +56,17 @@ export class NemotronTranscriber {
         if (this.startErrorMessage) throw new Error(this.startErrorMessage)
 
         console.warn("[nemotron] Decode process unavailable - decoding in the main process instead")
-        this.fallback = new NemotronDriver({
+        const options = {
             paths: this.options.nemotron,
             vadModelPath: this.options.vadModelPath,
             language: this.options.language || "en",
             onSegment: this.onSegment,
             onInterim: this.onInterim,
             onError: this.onError
-        })
+        }
+        // the streaming driver matters MORE here: in-process decodes block the main process, and
+        // its worst push is ~80ms against the batch path's ~670ms
+        this.fallback = this.options.streamingDecode === false ? new NemotronDriver(options) : new NemotronStreamDriver(options)
         await this.fallback.start()
         return true
     }
@@ -138,7 +142,7 @@ export class NemotronTranscriber {
             if (!this.stopped) this.onError(`Nemotron transcription process exited unexpectedly (code ${code})`)
         })
 
-        this.post(child, { type: "start", paths: this.options.nemotron, vadModelPath: this.options.vadModelPath, language: this.options.language || "en" })
+        this.post(child, { type: "start", paths: this.options.nemotron, vadModelPath: this.options.vadModelPath, language: this.options.language || "en", streamingDecode: this.options.streamingDecode !== false })
 
         const ok = await new Promise<boolean>((resolve) => {
             const timer = setTimeout(() => {

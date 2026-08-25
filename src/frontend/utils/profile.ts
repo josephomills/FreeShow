@@ -56,4 +56,3 @@ export function isGroupHidden(groupId: string): boolean {
     if (currentGlobalLevel === "none") return true
     return currentLocalLevel === "none"
 }
-

@@ -138,9 +138,7 @@
 
             // SVG path: Move to center (0,0), Line to start point (x1, y1), Arc to end point (x2, y2), Close (Z)
             // If it's a full circle, use a two-arc path to prevent browser rendering collapse
-            const d = isFull
-                ? `M 0 ${-r.toFixed(2)} A ${r.toFixed(2)} ${r.toFixed(2)} 0 1 1 0 ${r.toFixed(2)} A ${r.toFixed(2)} ${r.toFixed(2)} 0 1 1 0 ${-r.toFixed(2)} Z`
-                : `M 0 0 L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${largeArcFlag} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`
+            const d = isFull ? `M 0 ${-r.toFixed(2)} A ${r.toFixed(2)} ${r.toFixed(2)} 0 1 1 0 ${r.toFixed(2)} A ${r.toFixed(2)} ${r.toFixed(2)} 0 1 1 0 ${-r.toFixed(2)} Z` : `M 0 0 L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${largeArcFlag} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`
 
             const colorHex = item.colorHex || colors[idx % colors.length]
 
@@ -267,20 +265,18 @@
                                 {:else}
                                     <text x="0" y="4" class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 1.25); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5);">100%</text>
                                 {/if}
+                            {:else if segment.showInside && segment.label && !((item.chart?.holeSize ?? 0) > 0)}
+                                <text x={segment.textX} y={segment.textY - fontSize * 0.4} class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 0.75); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: bold;">
+                                    {segment.label.length > 8 ? segment.label.slice(0, 7) + ".." : segment.label}
+                                </text>
+                                <text x={segment.textX} y={segment.textY + fontSize * 0.5} class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 0.85); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: 500;">
+                                    {segment.percentage}%
+                                </text>
                             {:else}
-                                {#if segment.showInside && segment.label && !((item.chart?.holeSize ?? 0) > 0)}
-                                    <text x={segment.textX} y={segment.textY - fontSize * 0.4} class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 0.75); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: bold;">
-                                        {segment.label.length > 8 ? segment.label.slice(0, 7) + ".." : segment.label}
-                                    </text>
-                                    <text x={segment.textX} y={segment.textY + fontSize * 0.5} class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 0.85); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: 500;">
-                                        {segment.percentage}%
-                                    </text>
-                                {:else}
-                                    <!-- Always show percentage in the pie slice, centered if no label fits/exists -->
-                                    <text x={segment.textX} y={segment.textY + 2} class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 0.85); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: 500;">
-                                        {segment.percentage}%
-                                    </text>
-                                {/if}
+                                <!-- Always show percentage in the pie slice, centered if no label fits/exists -->
+                                <text x={segment.textX} y={segment.textY + 2} class="chart-text val-text" text-anchor="middle" dominant-baseline="middle" style="font-size: calc(var(--chart-font-size) * 0.85); fill: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: 500;">
+                                    {segment.percentage}%
+                                </text>
                             {/if}
                         {/if}
                     {/each}

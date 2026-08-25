@@ -12,6 +12,7 @@ export interface DetectedReference {
     source: "regex" | "llm" | "local" // "local" = the renderer's quote matcher (no LLM involved)
     quote?: string // the transcript text that triggered the detection
     matchedBibleId?: string // set when quoted verse text matched a specific translation
+    spokenBibleId?: string // set when the speaker named the translation with the reference ("...ten and five, good news")
     continuation?: boolean // a recitation flowing into the next verse of the live passage (follow-along)
     corrects?: { bookNumber: number; chapter: number; verseStart: number; verseEnd: number } // this detection supersedes an earlier similar-passage match (later words narrowed the search)
     timestamp: number
@@ -54,7 +55,7 @@ export type AiScriptureCommand =
     | { type: "chapter_previous" }
     | { type: "verse_jump"; verse: number; verseEnd?: number } // verseEnd: spoken range ("verses 1 to 5")
     | { type: "verse_add"; verse?: number } // extend the live selection ("add the next verse" / "add verse 6"); no verse = the next one
-    | { type: "chapter_jump"; chapter: number; verse?: number; verseEnd?: number }
+    | { type: "chapter_jump"; chapter: number; verse?: number; verseEnd?: number; book?: number; bookName?: string } // book: a book named just before the jump ("james... go to chapter 5 verse 16")
     | { type: "translation"; bibleId: string }
     | { type: "translation_cycle" }
     | { type: "translation_main" } // "give me the main translation" - back to the preferred one

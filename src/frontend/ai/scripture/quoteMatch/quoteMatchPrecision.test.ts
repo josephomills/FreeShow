@@ -188,6 +188,24 @@ describe("genuine fragments still emit (the recall contract)", () => {
     })
 })
 
+describe("announced translation wording (version cue)", () => {
+    // "some versions say be filled with the Spirit..." reached the panel as MEDIUM on a live
+    // service and never auto-projected. The announcement is the most deliberate quote cue there
+    // is; the same fragment that rates medium as incidental speech rates high when announced.
+    it("lifts a qualifying match to high when a version's wording was announced", () => {
+        const matcher = new QuoteMatcher([index()], { ...FRAGP, MIN_VOTE_WEIGHT: 4 })
+        const out = matcher.onSegment(seg("some versions say going to inherit"))
+        expect(out).toHaveLength(1)
+        expect(out[0].confidence).toBe("high")
+    })
+
+    it("still requires the same evidence floors - announcing alone detects nothing", () => {
+        const matcher = new QuoteMatcher([index()], { ...FRAGP, MIN_VOTE_WEIGHT: 4 })
+        const out = matcher.onSegment(seg("some versions say it a little differently you know"))
+        expect(out).toHaveLength(0)
+    })
+})
+
 describe("continuation confidence follows its seed", () => {
     it("a medium emission's continuation stays medium (no auto-projected chain)", () => {
         // MIN_VOTE_WEIGHT scaled down: two rare keys carry ~5.4 vote weight in this small

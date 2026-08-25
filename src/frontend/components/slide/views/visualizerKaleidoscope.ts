@@ -102,7 +102,7 @@ export function drawKaleidoscope({ ctx, bars, width, height, color, padding, edi
         p.y += p.vy * 2
         p.alpha -= 0.04
 
-        if (p.alpha <= 0 || (p.x * p.x + p.y * p.y) > maxRadiusSq) {
+        if (p.alpha <= 0 || p.x * p.x + p.y * p.y > maxRadiusSq) {
             return false
         }
 

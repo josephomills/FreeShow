@@ -39,7 +39,7 @@ export interface QuoteMatchEmission {
     confidence: "high" | "medium"
     translationId: string
     quoteText: string // the transcript stretch that matched
-    kind: "fresh" | "continuation" | "upgrade" | "correction"
+    kind: "fresh" | "continuation" | "upgrade" | "correction" | "requote" // requote: a verse returned to after the reading moved on
     corrects?: RefKey // correction only: the earlier emission this one supersedes (same speech, better match)
 }
 
@@ -59,6 +59,9 @@ interface ActiveTracker {
     chapter: number
     verseOrdinal: number // ordinal of the last emitted verse in its translation index
     lastAdvanceMs: number
+    // consecutive in-order advances (v1 -> v2 -> v3...). An established streak is what lets the
+    // next verse advance on its opening words alone - see tryContinuation
+    advanceStreak: number
     // confidence of the emission that armed this tracker: continuations of a HIGH reading stay
     // high (auto-project), continuations of a MEDIUM suggestion stay suggestions
     seedConfidence: "high" | "medium"
@@ -76,7 +79,13 @@ const refKey = (r: RefKey) => `${r.book}.${r.chapter}.${r.verseStart}-${r.verseE
 // spoken cues announcing that a quote is coming ("Paul said", "the Bible says", "it is written").
 // a cue only relaxes the SPEED bar (no waiting for a second confirming segment) - the evidence
 // floors are untouched, so a cue can never turn sermon speech into a detection
-const QUOTE_CUE_REGEX = /\b(?:bible|scriptures?|word(?: of god)?|jesus|christ|lord|god|apostle \w+|prophet \w+|paul|peter|john|james|moses|david|isaiah|solomon)\s+(?:says?|said|tells? us|told us|wrote|writes|declares?|reminds? us)\b|\bit is written\b/
+const QUOTE_CUE_REGEX = /\b(?:bible|scriptures?|word(?: of god)?|jesus|christ|lord|god|apostle \w+|prophet \w+|paul|peter|john|james|moses|david|isaiah|solomon)\s+(?:says?|said|tells? us|told us|wrote|writes|declares?|reminds? us)\b|\b(?:lord|god)\s+(?:told|said to|spoke to|commanded)\s+\w+\b|\bit is written\b/
+
+// "some versions say...", "another translation renders it..." - the speaker is announcing a
+// TRANSLATION's wording, the most deliberate quote cue there is. Beyond the speed bar it also
+// lifts the emission to high: the evidence floors are still untouched (the match must qualify
+// exactly as before), this only says a qualifying match was announced rather than incidental
+const VERSION_CUE_REGEX = /\b(?:some|other|another|one|a|the|this|that|every|many)\s+(?:versions?|translations?)\s+(?:says?|said|reads?|renders?(?:\s+it)?|puts?\s+it|translates?(?:\s+it)?|calls?\s+it|has|have)\b|\bversions?\s+say\b/
 
 // SPOKEN SEARCH SCOPES
 // the speaker can't recall the wording but names WHERE it lives: "somewhere in the new
@@ -192,6 +201,15 @@ const SCOPE_CUES: ScopeCue[] = [
 // touched - resolvable long after the soft passage memory expired, since the raw list persists
 const SAME_SCOPE_REGEX = /\b(?:in|from) (?:the|this|that) same (psalm|chapter|passage|parable|story|verse|book|letter|epistle|gospel)\b/
 
+// a pending version switch is forgotten after this long - two blips far apart are not a switch
+const PENDING_STICKY_TTL_MS = 3 * 60 * 1000
+
+// a re-quote's evidence must START this long after the verse's previous emission. The original
+// reading's trailing words keep arriving for a few seconds past the emission; anything after
+// this margin is NEW speech - the token timestamps, not a fixed wait, are what separate a
+// deliberate re-read (which may come just seconds later) from the reading's own residue
+const REQUOTE_FRESH_MARGIN_MS = 8_000
+
 export class QuoteMatcher {
     private indexes: TranslationIndex[]
     private tuning: Tuning
@@ -215,9 +233,16 @@ export class QuoteMatcher {
     // the translation of the last emission (seeded with the drawer's - the first index) - ties
     // between translations break toward it, so cards stop hopping versions mid-reading
     private stickyTranslationId: string | null = null
+    private versionCueUntilMs = 0
+    // a translation only takes the sticky slot after two decisive wins: with 30+ installed
+    // near-identical versions, single decisive wins land all over the family (NASB vs NAS95 vs
+    // NKJV differ by a word) and following each one hops the projected version per verse.
+    // Tie emissions in between are neutral - identical wording says nothing about which version
+    // is being read - so only a decisive win somewhere ELSE or age clears a pending switch
+    private pendingSticky: { translationId: string; atMs: number } | null = null
 
     // canonical refs already emitted (with confidence, for the single medium->high upgrade)
-    private emitted = new Map<string, { confidence: "high" | "medium"; upgraded: boolean }>()
+    private emitted = new Map<string, { confidence: "high" | "medium"; upgraded: boolean; atMs: number }>()
     // the last emission and WHEN its matched speech ended - a different ref built from the same
     // speech stretch is a reinterpretation (more words narrowed the search), not a second quote
     private lastEmitted: { ref: RefKey; queryToMs: number } | null = null
@@ -353,6 +378,10 @@ export class QuoteMatcher {
             }
             this.scopeUntilMs = segment.endMs + SCOPE_WINDOW_MS
         } else if (QUOTE_CUE_REGEX.test(spoken)) this.cueUntilMs = segment.endMs + tuning.CUE_WINDOW_MS
+        if (VERSION_CUE_REGEX.test(spoken)) {
+            this.cueUntilMs = Math.max(this.cueUntilMs, segment.endMs + tuning.CUE_WINDOW_MS)
+            this.versionCueUntilMs = segment.endMs + tuning.CUE_WINDOW_MS
+        }
 
         const tokens = tokenizeTranscriptWithSpans(segment.text).slice(0, tuning.SEGMENT_TOKEN_CAP)
         const seg = this.segmentOrdinal++
@@ -555,7 +584,14 @@ export class QuoteMatcher {
 
         const a = candidate.align
         const informativeOk = a.density >= tuning.CONT_DENSITY && a.coverage >= tuning.CONT_COVERAGE && a.matchedInformative >= tuning.CONT_MIN_INFORMATIVE && a.matchedWeight >= tuning.CONT_MIN_WEIGHT
-        if (!informativeOk && !this.verbatimContinuation(candidate)) return null
+        let accepted = informativeOk || this.verbatimContinuation(candidate)
+        // In an ESTABLISHED reading every verse otherwise lands only near its end, once enough
+        // words accumulated - a full passage read this way trails the reader the whole time.
+        // After two in-order advances the next verse's OPENING is proof enough: a reading always
+        // starts at the verse's first words, and an interjection ("hallelujah, are you seeing
+        // this") cannot produce consecutive tokens matching them in order.
+        if (!accepted && this.tracker.advanceStreak >= tuning.CONT_FAST_STREAK) accepted = this.openingContinuation(candidate)
+        if (!accepted) return null
 
         // the seed confidence carries: a MEDIUM suggestion's relaxed-floor continuations must not
         // chain into auto-projected HIGHs the original evidence never earned
@@ -574,6 +610,18 @@ export class QuoteMatcher {
         const bare = alignQuoteWindow(this.windowQuery(), candidate.index, candidate.ordinal, { ...tuning, SPILL_TOKENS: 0 })
         if (!bare) return false
         return bare.verseFrom <= 1 && bare.verseTo >= bare.verseLength - 2 && bare.density >= tuning.CONT_VERBATIM_DENSITY && bare.coverage >= tuning.CONT_VERBATIM_COVERAGE && bare.matched >= tuning.CONT_VERBATIM_MATCHED
+    }
+
+    /**
+     * The next verse's opening being read right now: a contiguous ordered run anchored at the
+     * verse start, judged spill-free like verbatimContinuation - spill matches from the verse
+     * before would otherwise fake the anchor.
+     */
+    private openingContinuation(candidate: Candidate): boolean {
+        const tuning = this.tuning
+        const bare = alignQuoteWindow(this.windowQuery(), candidate.index, candidate.ordinal, { ...tuning, SPILL_TOKENS: 0 })
+        if (!bare) return false
+        return bare.verseFrom <= 1 && bare.bestRunLength >= tuning.CONT_FAST_RUN
     }
 
     private tryFresh(candidates: Candidate[], nowMs: number): QuoteMatchEmission[] {
@@ -640,6 +688,16 @@ export class QuoteMatcher {
         // speaker quotes a phrase and reads the REST from the projection, so the full-recitation
         // floors must not be the only way in
         const phrase = phraseEvidence(top.align, tuning)
+
+        // A phrase shared with a verse ALREADY SURFACED is emphasis of that verse, not evidence
+        // for its twin. A preacher read Matthew 20:6, then repeated "about the eleventh hour"
+        // ("everybody say: what is the time?") - the phrase also lives in 20:9, and the repeats
+        // pumped the twin over the sustain bar while 20:6 sat ledgered. Only FULL floors (the
+        // twin's own distinct words actually read) may surface it past an emitted phrase-mate.
+        if (!classify(top.align, tuning)) {
+            const emphasizedPrior = candidates.some((candidate) => candidate !== top && !sameRef(candidate, top) && this.emitted.has(refKey(this.refOf(candidate))) && phraseEvidence(candidate.align, tuning) && candidate.align.bestRunWeight >= top.align.bestRunWeight - tuning.PHRASE_RIVAL_MARGIN)
+            if (emphasizedPrior) return []
+        }
 
         let confidence = classify(top.align, tuning)
         if (!confidence && phrase) {
@@ -724,6 +782,23 @@ export class QuoteMatcher {
                 already.upgraded = true
                 return [this.emit(top, "high", "upgrade", nowMs, true, candidates)]
             }
+
+            // A verse deliberately RETURNED to re-projects. A preacher read Psalm 119:1-6, then
+            // later quoted v1 verbatim - and nothing happened, because this ledger was permanent.
+            // Preaching is cyclical - verses repeat, passages are re-read - so the conditions
+            // separate a return from an echo without adding friction: the reading has moved on
+            // (the verse is not the live passage), the evidence STARTS after the previous
+            // emission's own trailing words (token timestamps, so a re-read seconds later works
+            // while window residue physically cannot fire), and it clears the strong single-shot
+            // bar entirely on its own - a fragment must never yank the output back.
+            const strongAlone = top.align.matchedInformative >= tuning.SINGLE_SHOT_INFORMATIVE && top.align.matchedWeight >= tuning.SINGLE_SHOT_WEIGHT && top.align.score >= tuning.EMIT_HIGH
+            const evidenceFromMs = this.ring[top.align.queryFrom]?.endMs ?? 0
+            if (strongAlone && evidenceFromMs > already.atMs + REQUOTE_FRESH_MARGIN_MS && !this.isLivePassage(top)) {
+                already.atMs = nowMs
+                already.confidence = "high"
+                return [this.emit(top, "high", "requote", nowMs, true, candidates)]
+            }
+
             this.bumpPreviousTop(key)
             return []
         }
@@ -745,6 +820,13 @@ export class QuoteMatcher {
         const emission = this.emit(top, confidence, corrects ? "correction" : "fresh", nowMs, false, candidates)
         if (corrects) emission.corrects = corrects
         return [emission]
+    }
+
+    /** Whether this candidate IS what the output is showing right now (per the projection anchor). */
+    private isLivePassage(candidate: Candidate): boolean {
+        if (!this.anchor) return false
+        const ref = this.refOf(candidate)
+        return ref.book === this.anchor.bookNumber && candidate.index.chapter[candidate.ordinal] === this.anchor.chapter && ref.verseStart <= this.anchor.verseEnd && ref.verseEnd >= this.anchor.verseStart
     }
 
     /** The earlier emission this candidate supersedes, or null when it is simply a new quote. */
@@ -812,23 +894,47 @@ export class QuoteMatcher {
         const grounded = pool.find((candidate) => candidate.index.translationId === this.stickyTranslationId && sameRef(candidate, chosen))
         if (!grounded) return chosen
         const qualifies = meetsFloors(grounded.align, this.tuning) || phraseEvidence(grounded.align, this.tuning)
-        return qualifies && grounded.effectiveScore >= chosen.effectiveScore - this.tuning.TOP_TIE_BAND ? grounded : chosen
+        if (!qualifies) return chosen
+        // for the SAME verse, span-relative score differences between translations are mostly
+        // artifacts - a shorter verse scores higher on the same matched phrase, and each corpus
+        // weighs the words differently. What decides is matched EVIDENCE: only when the spoken
+        // wording genuinely lives in the other translation (the reading translation's alignment
+        // collapses) does the switch happen. A preacher jumping to another verse is overwhelmingly
+        // still reading the same bible
+        const comparableEvidence = grounded.align.matchedWeight >= chosen.align.matchedWeight * this.tuning.GROUNDED_WEIGHT_RATIO
+        return comparableEvidence || grounded.effectiveScore >= chosen.effectiveScore - this.tuning.TOP_TIE_BAND ? grounded : chosen
     }
 
     private emit(chosen: Candidate, confidence: "high" | "medium", kind: QuoteMatchEmission["kind"], nowMs: number, skipLedger = false, pool: Candidate[] = []): QuoteMatchEmission {
+        // an announced translation reading ("some versions say...") is deliberate, not incidental
+        if (confidence === "medium" && nowMs <= this.versionCueUntilMs) confidence = "high"
+
         const candidate = this.preferGrounded(pool, chosen)
         const ref = this.refOf(candidate)
         const key = refKey(ref)
-        if (!skipLedger) this.emitted.set(key, { confidence, upgraded: false })
+        if (!skipLedger) this.emitted.set(key, { confidence, upgraded: false, atMs: nowMs })
         this.rememberPassage(ref.book, candidate.index.chapter[candidate.ordinal], nowMs)
-        this.stickyTranslationId = candidate.index.translationId
 
+        // the sticky translation follows the READING, not every blip: a different version must
+        // win twice before ties start resolving toward it
+        if (this.pendingSticky && nowMs - this.pendingSticky.atMs > PENDING_STICKY_TTL_MS) this.pendingSticky = null
+        if (candidate.index.translationId !== this.stickyTranslationId) {
+            if (this.pendingSticky?.translationId === candidate.index.translationId) {
+                this.pendingSticky = null
+                this.stickyTranslationId = candidate.index.translationId
+            } else {
+                this.pendingSticky = { translationId: candidate.index.translationId, atMs: nowMs }
+            }
+        }
+
+        const sequential = this.tracker && this.tracker.translationId === candidate.index.translationId && this.tracker.book === ref.book && candidate.ordinal === this.tracker.verseOrdinal + 1
         this.tracker = {
             translationId: candidate.index.translationId,
             book: ref.book,
             chapter: candidate.index.chapter[candidate.ordinal],
             verseOrdinal: candidate.ordinal,
             lastAdvanceMs: nowMs,
+            advanceStreak: sequential ? this.tracker!.advanceStreak + 1 : 0,
             seedConfidence: confidence
         }
         this.previousTop = null

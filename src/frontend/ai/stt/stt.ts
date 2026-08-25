@@ -1,22 +1,24 @@
 import { get, writable } from "svelte/store"
 import { Main } from "../../../types/IPC/Main"
 import { requestMain, sendMain } from "../../IPC/main"
-import { ai, language } from "../../stores"
+import { ai } from "../../stores"
+import { newToast } from "../../utils/common"
 import audioProcessor from "./audioProcessor.ts?worker&url"
 
 export const audioLevelStore = writable<number>(0.0)
 
-// nemotron (english-only) is the default engine on english UIs - whisper otherwise, when
-// interpretation mode is enabled (a whisper-only feature: per-window language detection), or
-// when whisper was configured for non-english speech the streaming model cannot transcribe
+// The streaming engine is the default. It transcribes as you speak rather than in windows, and
+// since moving to the multilingual Nemotron 3.5 export it covers ~40 languages, so the UI language
+// no longer decides which engine you get.
+//
+// Whisper remains the choice for interpretation mode, which needs per-window language detection
+// that the streaming engine cannot do - it detects a language but does not report one per window.
 export function resolveSttEngine(): string {
     const stt = get(ai)?.stt || {}
     if (stt.engine) return stt.engine
 
-    const whisperOptions = stt.engineOptions?.whisper || {}
-    const interpretation = whisperOptions.interpretationMode === true
-    const englishSpeech = !whisperOptions.language || String(whisperOptions.language).startsWith("en")
-    return get(language)?.includes("en") && !interpretation && englishSpeech ? "nemotron" : "whisper"
+    const interpretation = stt.engineOptions?.whisper?.interpretationMode === true
+    return interpretation ? "whisper" : "nemotron"
 }
 
 type AudioLevelCallback = (level: number) => void
@@ -50,11 +52,18 @@ export class SpeechToText {
             // the defaulted pick can be unsupported (sherpa-onnx missing) or simply not downloaded
             // (the ~660MB model is a manual download) - only an explicit nemotron choice should
             // surface those errors instead of falling back to whisper
-            const fallbackErrors = ["nemotron_unsupported", "nemotron_model_missing"]
+            const fallbackErrors = ["nemotron_unsupported", "nemotron_model_missing", "nemotron_model_outdated"]
             if (!get(ai)?.stt?.engine && engine === "nemotron" && fallbackErrors.includes(result?.error || "")) {
                 console.info(`[AI STT] defaulted nemotron unavailable (${result?.error}) - falling back to whisper`)
                 const retry = await requestMain(Main.AI_LISTEN_START, { engine: "whisper", engineOptions: get(ai)?.stt?.engineOptions?.whisper || {} }, undefined, 60000)
-                if (retry?.started) return { ok: true }
+                if (retry?.started) {
+                    // a fresh install has simply not downloaded the model yet, and whisper is the
+                    // intended default there - but an OUTDATED model means an update changed what
+                    // this build ships against, and the operator must hear about the swap or they
+                    // will evaluate the wrong engine's output all evening without knowing
+                    if (result?.error === "nemotron_model_outdated") newToast("ai.fallback_whisper_outdated")
+                    return { ok: true }
+                }
                 return { ok: false, error: retry?.error || "start_failed" }
             }
 
@@ -84,9 +93,30 @@ export class SpeechToText {
         if (!stream) return { ok: false, error: "microphone_access" }
 
         this.stream = stream
+        this.watchStreamHealth(stream)
         this.captureAudioContext(stream)
 
         return { ok: true }
+    }
+
+    // A live capture can die without an error anywhere: macOS ends the input track when the
+    // device switches (AirPods connecting, an interface unplugged), and nothing downstream can
+    // tell that from a quiet room - a real service lost 2.5 minutes of audio this way, and the
+    // decode seam across the hole is where mangled text comes from. The track says so when it
+    // happens; restarting the capture is the whole recovery (the engine keeps running and just
+    // sees a short gap).
+    private static watchStreamHealth(stream: MediaStream) {
+        const track = stream.getAudioTracks()[0]
+        if (!track) return
+
+        track.addEventListener("ended", () => {
+            if (this.stream !== stream) return // an intentional stop or a newer capture owns the session
+            console.warn("[AI STT] microphone track ended (device switched or unplugged) - restarting the capture")
+            void this.restartCapture()
+        })
+        // muted is usually transient (device pipeline hiccup) - worth a trace, not a restart
+        track.addEventListener("mute", () => console.warn("[AI STT] microphone track muted - audio is not flowing"))
+        track.addEventListener("unmute", () => console.info("[AI STT] microphone track unmuted"))
     }
 
     static disable() {
@@ -160,6 +190,16 @@ export class SpeechToText {
             // & the worklet only converts/frames samples - it either honors 16000 or throws
             const ac = new AudioContext({ sampleRate: 16000 })
             this.ac = ac
+
+            // the context can be suspended out from under a background window (power saving,
+            // output device changes) - resume it or the worklet silently stops pushing audio
+            ac.addEventListener("statechange", () => {
+                if (this.ac !== ac) return
+                if (ac.state === "suspended") {
+                    console.warn("[AI STT] audio context was suspended - resuming")
+                    ac.resume().catch((err) => console.error("[AI STT] could not resume the audio context:", err))
+                }
+            })
 
             // 1. Create source node
             const sourceNode = ac.createMediaStreamSource(stream)

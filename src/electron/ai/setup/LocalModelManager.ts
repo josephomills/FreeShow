@@ -3,7 +3,7 @@ import fs from "fs"
 import path from "path"
 import type { AiSetupOptions, EngineStatus } from "../../../types/ai/AiModels"
 import { createFolder } from "../../utils/files"
-import { getModelDir as getNemotronDir, getNemotronModelPaths, getVadModelPath, isNemotronSupported } from "../speech/nemotron/manager"
+import { getModelDir as getNemotronDir, getNemotronModelPaths, getVadModelPath, isNemotronSupported, getNemotronModelIntegrity } from "../speech/nemotron/manager"
 import { isModelReady, resolveWhisper, WHISPER_MODELS } from "../speech/whisper/manager"
 import { NemotronSetupManager } from "./models/nemotron"
 import { WhisperSetupManager } from "./models/whisper"
@@ -62,7 +62,11 @@ export class LocalModelManager {
         if (engineId === "nemotron") {
             const paths = getNemotronModelPaths()
             const supported = isNemotronSupported()
-            return { ready: supported && !!paths && !!getVadModelPath(), localPath: paths ? getNemotronDir() : null, supported }
+            // the files being present is not readiness - one from an earlier pinned revision still
+            // transcribes, so it would report ready forever while never being the measured model.
+            // Hashes once after a download or an upgrade, then reads a stamp.
+            const integrity = paths ? await getNemotronModelIntegrity() : "missing"
+            return { ready: supported && integrity === "ok" && !!getVadModelPath(), localPath: paths ? getNemotronDir() : null, supported, outdated: integrity === "outdated" }
         }
 
         const enginePath = customPath || this.getEnginePath(engineId)

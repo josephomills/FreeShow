@@ -60,7 +60,6 @@
             key: `presentation:${item.mediaId}`
         } as ContentLibraryCategory & { slideCount?: number }
     }
-
 </script>
 
 {#if $providerConnections.canva}

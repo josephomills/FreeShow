@@ -7,7 +7,9 @@ import type { BibleInstance } from "../../components/drawer/bible/scripture"
 import { loadJsonBible, outputIsScripture } from "../../components/drawer/bible/scripture"
 import { setDrawerTabData } from "../../components/helpers/historyHelpers"
 import { activeScripture, aiScriptureAutoPaused, aiScriptureSuggestions, drawerTabsData, outLocked, scriptureHistory, scriptures } from "../../stores"
-import { parseNumber, projectDetection, projectResolved, restorePrevious } from "./projection"
+import type { DetectedReference } from "../../../types/ai/AiScripture"
+import { getBookExact, getChapterExact, hasBookNumber } from "./bibleLookup"
+import { parseNumber, projectDetection, projectResolved, resolveBookNumber, restorePrevious } from "./projection"
 import { getSettings, scriptureState } from "./scriptureState"
 import { cycleRank, favoriteTranslationIds, preferredTranslationId } from "./translationPreference"
 
@@ -55,11 +57,27 @@ export async function executeScriptureCommand(cmd: AiScriptureCommandEvent): Pro
         const bible = await loadJsonBible(parseId)
         if (!bible) return
 
-        const Book = await bible.getBook(reference.book)
+        // a book named right before the jump ("james... go to chapter 5 verse 16") retargets it -
+        // without this the jump runs inside whatever book is live, which projected "1 Timothy
+        // 5:16" for James 5:16 on a real service
+        let targetBookRef: number | string = reference.book
+        if (cmd.type === "chapter_jump" && cmd.book && cmd.book !== parseNumber(reference.book)) {
+            const resolved = resolveBookNumber(bible, { book: cmd.bookName || "", bookNumber: cmd.book } as DetectedReference)
+            if (!resolved) return
+            targetBookRef = resolved
+        }
+
+        const Book = await getBookExact(bible, targetBookRef)
+        if (!Book) {
+            console.warn(`[AiScripture] Voice command book ${targetBookRef} is not in "${parseId}" - ignoring the command instead of jumping in the wrong book`)
+            return
+        }
         const chapterCount = Book.data.chapters?.length || 0
         const maxVerseOf = async (chapterNumber: number) => {
-            const Chapter = await Book.getChapter(chapterNumber)
-            const chapterVerses = Chapter.data.verses || []
+            // a chapter this book does not have answers as chapter 1 (bibleLookup.ts) - report it
+            // as absent instead, so jump math never clamps against the wrong chapter's verses
+            const Chapter = await getChapterExact(Book, chapterNumber)
+            const chapterVerses = Chapter?.data.verses || []
             return chapterVerses.length ? (chapterVerses[chapterVerses.length - 1]?.number ?? chapterVerses.length) : 0
         }
 
@@ -122,7 +140,8 @@ export async function executeScriptureCommand(cmd: AiScriptureCommandEvent): Pro
             const cap = getSettings().maxVerses ?? 6
             if (cap > 0 && targetVerses.length > cap) targetVerses = targetVerses.slice(0, cap)
         }
-        await projectResolved(currentId, reference.book, targetChapter, targetVerses)
+        console.info(`[AiScripture] Voice command ${cmd.type} -> book ${targetBookRef} ${targetChapter}:${targetVerses[0]}${targetVerses.length > 1 ? "-" + targetVerses[targetVerses.length - 1] : ""} in "${currentId}" ("${cmd.phrase}")`)
+        await projectResolved(currentId, targetBookRef, targetChapter, targetVerses)
     } catch (err) {
         console.error("Error executing AI scripture voice command:", err)
     }
@@ -156,7 +175,9 @@ async function switchTranslation(cmd: Extract<AiScriptureCommandEvent, { type: "
     // map the current book to the target bible: same number when both use the 66 book canon, name match otherwise
     let targetBook: number | string = from.book
     const targetBooks = targetBible.data.books || []
-    if ((from.bible.data.books || []).length !== 66 || targetBooks.length !== 66) {
+    // the canon shortcut only holds when both bibles really carry the number - an unverified one
+    // resolves to books[0] downstream and switches translation AND book in one go (bibleLookup.ts)
+    if ((from.bible.data.books || []).length !== 66 || targetBooks.length !== 66 || !hasBookNumber(targetBooks, from.book)) {
         const nameLower = from.bookName.toLowerCase()
         const match = targetBooks.find((a) => a.name?.toLowerCase() === nameLower || a.abbreviation?.toLowerCase() === nameLower || a.id?.toLowerCase() === nameLower)
         if (match) targetBook = match.number
@@ -168,11 +189,21 @@ async function switchTranslation(cmd: Extract<AiScriptureCommandEvent, { type: "
     }
 
     // clamp the current chapter & verses to what exists in the target translation
-    const TargetBook = await targetBible.getBook(targetBook)
+    const TargetBook = await getBookExact(targetBible, targetBook)
+    if (!TargetBook) {
+        console.warn(`[AiScripture] "${from.bookName}" is not in "${targetParseId}" - staying on the current translation instead of switching to the wrong book`)
+        return
+    }
+
     const targetChapterCount = TargetBook.data.chapters?.length || 0
     const targetChapter = targetChapterCount ? Math.min(Math.max(1, from.chapter), targetChapterCount) : from.chapter
 
-    const TargetChapter = await TargetBook.getChapter(targetChapter)
+    const TargetChapter = await getChapterExact(TargetBook, targetChapter)
+    if (!TargetChapter) {
+        console.warn(`[AiScripture] ${from.bookName} ${targetChapter} is not in "${targetParseId}" - staying on the current translation`)
+        return
+    }
+
     const targetChapterVerses = TargetChapter.data.verses || []
     const maxVerse = targetChapterVerses.length ? (targetChapterVerses[targetChapterVerses.length - 1]?.number ?? targetChapterVerses.length) : 0
     const verses = [...new Set(from.verses.map((a) => (maxVerse ? Math.min(Math.max(1, a), maxVerse) : a)))].sort((a, b) => a - b)

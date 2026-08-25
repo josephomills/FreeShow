@@ -2,8 +2,9 @@
 // tier 1: fast local regex detection of explicitly spoken references ("John chapter 3 verse 16")
 // tier 2: LLM detection over the rolling transcript for paraphrased/quoted references (optional, needs an API key)
 
-import type { AiScriptureBook, AiScriptureState, DetectedReference } from "../../../../types/ai/AiScripture"
+import type { AiScriptureBook, AiScriptureTranslation, AiScriptureState, DetectedReference } from "../../../../types/ai/AiScripture"
 import { normalizeSpokenNumbers } from "../../commands/spokenNumbers"
+import { maxVerseInChapter } from "../chapterVerseCounts"
 import { LLM_API_TIMEOUT } from "../../llm/models/APIModel"
 import { getLLMScriptureProvider } from "../llmTalkScripture"
 import type { BookIndex } from "./references"
@@ -24,6 +25,10 @@ export interface AiScriptureAnchor {
 // "verse 5", "verse number 5", "the 5th verse" - a range may follow ("verses 3 to 5", "3 and 4");
 // "and" as a range word is safe here because the verse word is present by construction
 const BARE_VERSE_REGEX = /(^|[^a-z0-9])((?:the\s+)?(?:verses?\s+(?:number\s+)?(?<n1>\d{1,3})\b|(?<n2>\d{1,3})(?:st|nd|rd|th)\s+verses?\b)(?:\s*(?:-|–|to\b|through\b|and\b|till\b|until\b)\s*(?<end>\d{1,3})\b)?)/g
+
+// a bare number while a passage is live: "...with all boldness. Thirty one. And when they had
+// prayed..." - reading straight through, the next verse is cued by its number alone
+const BARE_NUMBER_REGEX = /(^|[^a-z0-9:])(\d{1,3})\b(?!\s*:)/g
 
 interface TranscriptSegment {
     text: string
@@ -48,15 +53,25 @@ interface DetectionCandidate {
     confidence: "high" | "medium" | "low"
     type: "explicit" | "quoted"
     quote?: string
+    spokenBibleId?: string
 }
 
 interface DetectionCoordinatorOptions {
     books: AiScriptureBook[]
+    /** Installed translations, so a version named with the reference resolves to its bible. */
+    translations?: AiScriptureTranslation[]
     llm: { provider: string; model: string } | null
     getApiKey: (providerId: string) => string
     onDetection: (ref: DetectedReference) => void
     onStatus: (state: AiScriptureState, extra?: { message?: string; keyless?: boolean }) => void
     cooldownSeconds?: number
+    /**
+     * Hold a reference sitting at the very end of the transcript until more speech follows it or
+     * the utterance closes, because it may still be being spoken. On unless explicitly disabled;
+     * the switch exists so the benchmark can measure what the guard costs and what it buys on the
+     * same audio, rather than against a remembered number.
+     */
+    holdProvisionalReferences?: boolean
 }
 
 const ROLLING_MAX_MS = 90000 // rolling transcript cap
@@ -65,17 +80,37 @@ const TIER1_WINDOW_MS = 15000 // tier 1 only rescans the most recent speech
 const LLM_MIN_NEW_WORDS = 15 // don't call the LLM again until this much new speech arrived
 const LLM_ALREADY_DETECTED_MS = 180000 // recently emitted refs sent to the LLM so it skips them
 const DEFAULT_COOLDOWN_SECONDS = 90 // suppress re-emitting an intersecting reference within this window
+// within this floor a repeat is the same breath ("John 3:16... John 3:16!") - suppressed even
+// when the reference is not the live passage
+const REEMIT_FLOOR_MS = 15000
+
+/**
+ * How long a chapter with no spoken verse waits to see whether one follows.
+ *
+ * "Ephesians chapter 2" is a complete reference to Ephesians 2:1, and preachers say it on the way
+ * to "verse 8" constantly - so projecting it immediately put the wrong passage on screen and then
+ * corrected itself. Verse 1 is a DEFAULT here, not something anyone said, which is what separates
+ * this from a reference the speaker finished.
+ *
+ * Measured in audio time, so it does not depend on how fast the machine is. A preacher who really
+ * did mean the whole chapter waits this long to see it; one who is mid-reference is not
+ * contradicted on screen.
+ */
+const BARE_CHAPTER_HOLD_MS = 4000
 
 export class DetectionCoordinator {
     private opts: DetectionCoordinatorOptions
     private bookIndex: BookIndex
     private cooldownMs: number
+    private holdProvisional: boolean
 
     // a single replaced anchor object - strictly bounded, never accumulates over a long sermon
     private anchor: AiScriptureAnchor | null = null
     private anchorBookPrefix: RegExp | null
 
     private segments: TranscriptSegment[] = []
+    /** Chapters seen with no spoken verse, waiting to learn whether one follows. Keyed book.chapter. */
+    private pendingChapters = new Map<string, { candidate: DetectionCandidate; atMs: number }>()
     private emitted = new Map<string, EmittedReference[]>() // key: "bookNumber.chapter"
     private idCounter = 0
     private stopped = false
@@ -92,9 +127,10 @@ export class DetectionCoordinator {
 
     constructor(opts: DetectionCoordinatorOptions) {
         this.opts = opts
-        this.bookIndex = buildBookIndex(opts.books)
+        this.bookIndex = buildBookIndex(opts.books, opts.translations)
         this.anchorBookPrefix = this.bookIndex.bookPattern ? new RegExp("(?:^|[^a-z0-9])(?:" + this.bookIndex.bookPattern + ")[,.]?\\s+$") : null
         this.cooldownMs = (opts.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS) * 1000
+        this.holdProvisional = opts.holdProvisionalReferences !== false
     }
 
     // replace the anchor passage (what is live on the output right now)
@@ -109,7 +145,7 @@ export class DetectionCoordinator {
     /** The Search Bibles selection changed mid-session - the spoken book-name index follows it. */
     updateBooks(books: AiScriptureBook[]): void {
         this.opts.books = books
-        this.bookIndex = buildBookIndex(books)
+        this.bookIndex = buildBookIndex(books, this.opts.translations)
         this.anchorBookPrefix = this.bookIndex.bookPattern ? new RegExp("(?:^|[^a-z0-9])(?:" + this.bookIndex.bookPattern + ")[,.]?\\s+$") : null
     }
 
@@ -117,18 +153,23 @@ export class DetectionCoordinator {
         this.anchor = ctx
     }
 
-    onTranscriptSegment(segment: { text: string; startMs: number; endMs: number }): void {
+    onTranscriptSegment(segment: { text: string; startMs: number; endMs: number; utteranceEnd?: boolean }): void {
         if (this.stopped) return
 
         this.segments.push(segment)
         this.totalWords += countWords(segment.text)
         this.trimRollingTranscript()
 
-        this.runTier1()
+        this.runTier1(segment.utteranceEnd === true)
         this.maybeRunTier2()
     }
 
     stop(): void {
+        // a chapter still waiting for a verse that never came is what the speaker meant after all;
+        // the wait only ends when speech does, and this is where speech ends
+        this.pendingChapters.forEach((pending) => this.tryEmit(pending.candidate, "regex"))
+        this.pendingChapters.clear()
+
         this.stopped = true
         this.llmRerunPending = false
         if (this.llmController) {
@@ -137,26 +178,69 @@ export class DetectionCoordinator {
         }
         this.segments = []
         this.emitted.clear()
+        this.pendingChapters.clear()
     }
 
     // TIER 1
 
-    private runTier1() {
+    /**
+     * `settled` means the transcriber closed the utterance, so the newest words are the last ones
+     * of that utterance and nothing will extend them. Until then a reference sitting at the very
+     * end of the transcript is only PROVISIONALLY complete - see the tailAnchored guard below.
+     */
+    private runTier1(settled: boolean) {
         const newestEnd = this.segments[this.segments.length - 1].endMs
         const windowText = this.segments
             .filter((segment) => segment.endMs >= newestEnd - TIER1_WINDOW_MS)
             .map((segment) => segment.text)
             .join(" ")
 
-        matchReferences(windowText, this.bookIndex).forEach((match) => {
-            this.tryEmit({ book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote }, "regex")
+        const newestMs = this.segments[this.segments.length - 1].endMs
+        const matches = matchReferences(windowText, this.bookIndex)
+
+        // a chapter the speaker went on to give a verse for is not a bare chapter any more
+        matches.forEach((match) => {
+            if (!match.bareChapter) this.pendingChapters.delete(`${match.bookNumber}.${match.chapter}`)
         })
 
-        this.runAnchorTier1(windowText)
+        matches.forEach((match) => {
+            // A reference at the very end of the transcript may still be being spoken. Emitting it
+            // immediately is why "Matthew 6:33" reached the screen as Matthew 6:1, then 6:30, then
+            // 6:33 - three passages in just over a second, two of them wrong, because "matthew 6"
+            // and "matthew 6 30" are each a valid reference on their own. Holding it costs one
+            // segment of latency (the streaming engine emits several a second) and only until the
+            // speaker says anything else at all, including the pause that closes the utterance.
+            if (this.holdProvisional && match.tailAnchored && !settled) return
+
+            const candidate: DetectionCandidate = { book: match.book, bookNumber: match.bookNumber, chapter: match.chapter, verseStart: match.verseStart, verseEnd: match.verseEnd, confidence: match.confidence, type: "explicit", quote: match.quote, spokenBibleId: match.spokenBibleId }
+
+            // A chapter with no spoken verse waits to learn whether one follows - see
+            // BARE_CHAPTER_HOLD_MS. Verse 1 is this reference's default, not the speaker's word.
+            if (this.holdProvisional && match.bareChapter) {
+                const key = `${match.bookNumber}.${match.chapter}`
+                if (!this.pendingChapters.has(key)) this.pendingChapters.set(key, { candidate, atMs: newestMs })
+                return
+            }
+
+            this.tryEmit(candidate, "regex")
+        })
+
+        this.flushPendingChapters(newestMs)
+
+        this.runAnchorTier1(windowText, settled)
+    }
+
+    /** Emit chapters whose wait is up - nobody gave them a verse, so the chapter is what was meant. */
+    private flushPendingChapters(newestMs: number) {
+        for (const [key, pending] of this.pendingChapters) {
+            if (newestMs - pending.atMs < BARE_CHAPTER_HOLD_MS) continue
+            this.pendingChapters.delete(key)
+            this.tryEmit(pending.candidate, "regex")
+        }
     }
 
     // bare "verse N" / "verses N to M" mentions (no book named) resolve against the anchor passage
-    private runAnchorTier1(windowText: string) {
+    private runAnchorTier1(windowText: string, settled: boolean) {
         const anchor = this.anchor
         if (!anchor) return
 
@@ -184,8 +268,33 @@ export class DetectionCoordinator {
             let verseEnd = groups.end !== undefined ? parseInt(groups.end, 10) : verseStart
             if (verseEnd < verseStart) verseEnd = verseStart
 
+            // same growing-number problem as a full reference: "verse 3" becomes "verse 33"
+            if (this.holdProvisional && !settled && !normalized.slice(match.index + match[0].length).trim()) continue
+
             // the anchor is the chapter live on screen, so a bare verse mention is context-certain
             this.tryEmit({ book: anchor.book, bookNumber: anchor.bookNumber, chapter: anchor.chapter, verseStart, verseEnd, confidence: "high", type: "explicit", quote: match[2] }, "regex")
+        }
+
+        // Reading straight through, the next verse is often cued by its number ALONE: "...speak
+        // your word with all boldness. Thirty one. And when they had prayed..." (a live service,
+        // reading Acts 4 - verse 31 was only caught later by the quote matcher). Only the number
+        // that is EXACTLY the next verse after the live one counts, and only while that verse
+        // exists: any other number in preaching is a count, an age, an amount - never this one.
+        const nextVerse = anchor.verseEnd + 1
+        if (nextVerse <= (maxVerseInChapter(anchor.bookNumber, anchor.chapter) || Infinity)) {
+            BARE_NUMBER_REGEX.lastIndex = 0
+            while ((match = BARE_NUMBER_REGEX.exec(normalized)) !== null) {
+                if (parseInt(match[2], 10) !== nextVerse) continue
+                const start = match.index + match[1].length
+                if (covered.some(([from, to]) => start >= from && start < to)) continue
+                // "verse 31"/"chapter 31" carry their own word and their own rules
+                if (/(?:verses?|chapters?|numbers?)\s*$/.test(normalized.slice(0, start))) continue
+                if (this.anchorBookPrefix?.test(normalized.slice(0, start))) continue
+                // the number may still be growing ("31" on its way to "310")
+                if (this.holdProvisional && !settled && !normalized.slice(match.index + match[0].length).trim()) continue
+
+                this.tryEmit({ book: anchor.book, bookNumber: anchor.bookNumber, chapter: anchor.chapter, verseStart: nextVerse, verseEnd: nextVerse, confidence: "high", type: "explicit", quote: match[2] }, "regex")
+            }
         }
     }
 
@@ -306,8 +415,14 @@ export class DetectionCoordinator {
         const keepMs = Math.max(this.cooldownMs, LLM_ALREADY_DETECTED_MS)
         const entries = (this.emitted.get(key) || []).filter((entry) => now - entry.timestamp < keepMs)
 
-        // suppress when it intersects (same book+chapter and overlapping verse range) a reference emitted within the cooldown
-        const suppressed = entries.some((entry) => now - entry.timestamp < this.cooldownMs && candidate.verseStart <= entry.verseEnd && candidate.verseEnd >= entry.verseStart)
+        // Suppress when it intersects (same book+chapter and overlapping verse range) a reference
+        // emitted within the cooldown - but only while it is STILL what the output is showing, or
+        // for a short floor after emission. The cooldown exists to stop re-projecting what is
+        // already on screen; a preacher RETURNING to a passage after the projection moved on is a
+        // change of output they asked for in words, and holding it for the rest of a 90s window
+        // left a re-quoted Psalm 119:1 stuck behind the v6 the reading had advanced to.
+        const anchorIntersects = this.anchor && this.anchor.bookNumber === candidate.bookNumber && this.anchor.chapter === candidate.chapter && candidate.verseStart <= this.anchor.verseEnd && candidate.verseEnd >= this.anchor.verseStart
+        const suppressed = entries.some((entry) => now - entry.timestamp < this.cooldownMs && candidate.verseStart <= entry.verseEnd && candidate.verseEnd >= entry.verseStart && (anchorIntersects || now - entry.timestamp < REEMIT_FLOOR_MS))
         if (!suppressed) {
             entries.push({ book: candidate.book, chapter: candidate.chapter, verseStart: candidate.verseStart, verseEnd: candidate.verseEnd, timestamp: now })
             this.opts.onDetection({
@@ -321,6 +436,7 @@ export class DetectionCoordinator {
                 type: candidate.type,
                 source,
                 quote: candidate.quote,
+                spokenBibleId: candidate.spokenBibleId,
                 timestamp: now
             })
         }

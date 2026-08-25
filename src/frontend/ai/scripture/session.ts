@@ -6,7 +6,7 @@ import { get } from "svelte/store"
 import type { AiScriptureDetectionConfig } from "../../../types/ai/AiScripture"
 import { Main } from "../../../types/IPC/Main"
 import { sendMain } from "../../IPC/main"
-import { ai, aiInterim, aiScriptureAutoPaused, aiScriptureHasProjected, aiScriptureStatus, aiScriptureSuggestions, aiStatus, aiTranscript, scriptures } from "../../stores"
+import { ai, aiInterim, aiScriptureAutoPaused, aiScriptureHasProjected, aiScriptureStatus, aiScriptureSuggestions, aiStatus, aiTranscript, drawerTabsData, scriptures } from "../../stores"
 import { resolveSttEngine, SpeechToText } from "../stt/stt"
 import { cancelPendingAutoProjection, handleDetection, pruneSuggestions } from "./detections"
 import { startQuoteMatching, stopQuoteMatching } from "./quoteMatch/quoteMatchSession"
@@ -46,6 +46,8 @@ async function startSession(): Promise<{ ok: boolean; error?: string }> {
     const settings = getSettings()
 
     scriptureState.searchBibleIds = sessionBibleIds()
+    // snapshot the operator's drawer choice before any projection follow can move it
+    scriptureState.sessionFallbackTranslationId = get(drawerTabsData).scripture?.activeSubTab || ""
     if (!bookTableIds().length) return startError("no_scripture")
 
     const books = await buildBookTable(bookTableIds())

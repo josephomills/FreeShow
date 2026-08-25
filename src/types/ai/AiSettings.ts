@@ -24,6 +24,26 @@ export interface SttEngineOptions {
     model?: string
     customModelPath?: string
 
+    /**
+     * Nemotron: drive the recognizer as one persistent cache-aware stream instead of re-decoding
+     * each utterance on a fresh one. ON unless explicitly set false - measured over 19 sermon
+     * excerpts at a third of the CPU, lower latency and slightly better accuracy than the batch
+     * path (src/electron/ai/speech/bench/). The flag stays so a live service can fall back without
+     * a rebuild.
+     */
+    streamingDecode?: boolean
+
+    /**
+     * Keep the microphone audio of the session as a WAV under bin/bench/sessions.
+     *
+     * Off unless deliberately turned on. Transcription faults reported from live services have
+     * repeatedly failed to reproduce from recorded sermons - full messages, worship and silence all
+     * decode cleanly on the bench - so the input itself is the missing evidence. A recording turns
+     * "it happens live" into a fixture. It is a recording of a church service, so it stays local
+     * and only exists while someone is chasing a fault.
+     */
+    recordSessionAudio?: boolean
+
     // WIP interpretationMode
     interpretationMode?: boolean
     listenLanguage?: string

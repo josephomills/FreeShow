@@ -1,7 +1,7 @@
 <script lang="ts">
     import HRule from "../../../components/input/HRule.svelte"
     import MaterialDropdown from "../../../components/inputs/MaterialDropdown.svelte"
-    import { ai, language } from "../../../stores"
+    import { ai } from "../../../stores"
     import { translateText } from "../../../utils/language"
     import { resolveSttEngine } from "../../stt/stt"
     import LlmOptions from "./LlmOptions.svelte"
@@ -26,8 +26,7 @@
     }
 
     const sttEngines = [
-        // only show if any English language is selected, as this only supports English:
-        ...($language?.includes("en") || $ai.stt?.engine === "nemotron" ? [{ value: "nemotron", label: "Nemotron", data: translateText("ai.engine_nemotron_hint") }] : []),
+        { value: "nemotron", label: "Nemotron", data: translateText("ai.engine_nemotron_hint") },
         { value: "whisper", label: "Whisper", data: translateText("ai.engine_whisper_hint") }
     ]
     $: selectedSttEngine = sttOptions.engine || resolveSttEngine()

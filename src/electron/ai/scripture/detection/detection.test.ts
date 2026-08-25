@@ -8,7 +8,7 @@ vi.mock("../llmTalkScripture", () => ({
 
 import { normalizeSpokenNumbers } from "../../commands/spokenNumbers"
 import { DetectionCoordinator } from "./coordinator"
-import { detectExplicitReferences } from "./references"
+import { buildBookIndex, detectExplicitReferences, matchReferences } from "./references"
 
 const BOOKS = [
     { number: 19, canonNumber: 19, names: ["Psalms", "Psalm"] },
@@ -64,6 +64,96 @@ describe("normalizeSpokenNumbers", () => {
         expect(normalizeSpokenNumbers("1st John 4:7")).toBe("1 john 4:7")
         // ...but keeps the ordinal whole before chapter/verse ("the 1st chapter")
         expect(normalizeSpokenNumbers("the 1st chapter of John")).toBe("the 1st chapter of john")
+    })
+})
+
+// A translation named right after the reference ("one samuel ten and five, good news") - from a
+// live service where exactly that spoken form only produced a bare chapter 10, and the verse had
+// to wait for the quote matcher. The version name is deliberate-reference evidence: it unlocks
+// the bare "and N" verse reading, cues the match, and picks the projection bible.
+describe("spoken translation after a reference", () => {
+    const SAMUEL_BOOKS = [...BOOKS, { number: 9, canonNumber: 9, names: ["1 Samuel"] }]
+    const TRANSLATIONS = [
+        { id: "gnt-id", names: ["GNT", "Good News", "Good News Translation"] },
+        { id: "kjv-id", names: ["KJV", "King James", "King James Version"] }
+    ]
+    const match = (text: string) => matchReferences(normalizeSpokenNumbers(text), buildBookIndex(SAMUEL_BOOKS, TRANSLATIONS))
+
+    it("reads 'one samuel ten and five good news' as 1 Samuel 10:5 in the GNT", () => {
+        const refs = match("look at what the prophet samuel told saul one samuel ten and five good news you go to the hill of god")
+        expect(refs).toHaveLength(1)
+        expect(refs[0]).toMatchObject({ bookNumber: 9, chapter: 10, verseStart: 5, confidence: "high", spokenBibleId: "gnt-id", bareChapter: false })
+    })
+
+    it("survives one stray token before the version name", () => {
+        // the live transcript carried "...ten and five guy good news"
+        const refs = match("one samuel ten and five guy good news")
+        expect(refs[0]).toMatchObject({ chapter: 10, verseStart: 5, spokenBibleId: "gnt-id" })
+    })
+
+    it("does not hold a complete reference-with-version for confirmation", () => {
+        const refs = match("one samuel ten and five good news")
+        expect(refs[0].tailAnchored).toBe(false)
+    })
+
+    it("attaches the version to a colon reference too", () => {
+        const refs = match("john 3:16 king james")
+        expect(refs[0]).toMatchObject({ bookNumber: 43, chapter: 3, verseStart: 16, spokenBibleId: "kjv-id" })
+    })
+
+    it("still refuses the bare 'and N' reading with no imperative and no version", () => {
+        const refs = match("he was in acts 15 and 3 others were with him")
+        expect(refs.every((ref) => !(ref.bookNumber === 44 && ref.verseStart === 3))).toBe(true)
+    })
+
+    it("keeps the bare-chapter hold when only a chapter and version were spoken", () => {
+        const refs = match("romans 8 king james")
+        expect(refs[0]).toMatchObject({ chapter: 8, bareChapter: true, spokenBibleId: "kjv-id" })
+    })
+
+    it("finds no version when none is installed under that name", () => {
+        const refs = matchReferences(normalizeSpokenNumbers("john 3:16 good news"), buildBookIndex(SAMUEL_BOOKS, []))
+        expect(refs[0].spokenBibleId).toBeUndefined()
+    })
+})
+
+// Chapters above 99 read digit by digit - "Psalm one one nine" is 119. From a live service
+// where that spoken form triggered nothing: it normalized to "psalm 1 1 9" and parsed as 1:1.
+describe("digit-read chapters (psalm one one nine)", () => {
+    const psalmIndex = () => buildBookIndex(BOOKS)
+    const refs = (text: string) => matchReferences(normalizeSpokenNumbers(text), psalmIndex())
+
+    it("reads 'psalm one one nine verse one' as Psalm 119:1", () => {
+        expect(refs("psalm one one nine verse one")[0]).toMatchObject({ bookNumber: 19, chapter: 119, verseStart: 1, confidence: "high" })
+    })
+
+    it("coalesces the chapter even with an interjection before the verse (bare chapter, held for its verse)", () => {
+        // the live phrasing: the verse arrives later and resolves through the bare-chapter hold
+        expect(refs("now psalm one one nine we're going to read from verse one")[0]).toMatchObject({ bookNumber: 19, chapter: 119, bareChapter: true })
+    })
+
+    it("reads 'psalm one nineteen verse six' as Psalm 119:6 (1:19 does not exist)", () => {
+        expect(refs("psalm one nineteen verse six")[0]).toMatchObject({ bookNumber: 19, chapter: 119, verseStart: 6 })
+    })
+
+    it("keeps 'psalm one three' as Psalm 1:3 - both readings are real, the literal one wins", () => {
+        expect(refs("psalm one three")[0]).toMatchObject({ bookNumber: 19, chapter: 1, verseStart: 3 })
+    })
+
+    it("reads 'psalm chapter one one nine' through the chapter word", () => {
+        expect(refs("psalm chapter one one nine verse two")[0]).toMatchObject({ bookNumber: 19, chapter: 119, verseStart: 2 })
+    })
+
+    it("never coalesces for a book without such chapters", () => {
+        // john 1:19 exists and john has 21 chapters - "1 1 9" stays a literal reading
+        const out = refs("john one one nine")
+        expect(out[0]).toMatchObject({ bookNumber: 43, chapter: 1, verseStart: 1 })
+    })
+
+    it("never coalesces past the book's last chapter", () => {
+        // "psalm 1 9 9" -> 199 > 150 stays literal, and the literal 1:9 then fails verse
+        // bounds (Psalm 1 has 6 verses) - an honest nothing rather than a guessed chapter
+        expect(refs("psalm one nine nine")).toHaveLength(0)
     })
 })
 
@@ -381,46 +471,57 @@ describe("DetectionCoordinator", () => {
         const onDetection = vi.fn()
         const coordinator = createCoordinator(onDetection)
 
-        coordinator.onTranscriptSegment({ text: "please turn to john chapter three verse sixteen", startMs: 0, endMs: 3000 })
+        coordinator.onTranscriptSegment({ text: "please turn to john chapter three verse sixteen", startMs: 0, endMs: 3000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
         expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16, confidence: "high", type: "explicit", source: "regex", quote: "john chapter 3 verse 16" })
 
         // same reference still inside the tier 1 window + repeated -> suppressed
-        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen says", startMs: 3000, endMs: 6000 })
+        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen says", startMs: 3000, endMs: 6000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
 
         // overlapping verse range in the same chapter -> suppressed
-        coordinator.onTranscriptSegment({ text: "john 3:15-17", startMs: 6000, endMs: 8000 })
+        coordinator.onTranscriptSegment({ text: "john 3:15-17", startMs: 6000, endMs: 8000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
 
         // non-overlapping verse in the same chapter -> new detection
-        coordinator.onTranscriptSegment({ text: "john 3:1", startMs: 8000, endMs: 9000 })
+        coordinator.onTranscriptSegment({ text: "john 3:1", startMs: 8000, endMs: 9000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(2)
         expect(onDetection.mock.calls[1][0]).toMatchObject({ chapter: 3, verseStart: 1, verseEnd: 1 })
 
         // other chapter -> new detection
-        coordinator.onTranscriptSegment({ text: "john 4:16", startMs: 9000, endMs: 10000 })
+        coordinator.onTranscriptSegment({ text: "john 4:16", startMs: 9000, endMs: 10000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(3)
         expect(onDetection.mock.calls[2][0]).toMatchObject({ chapter: 4, verseStart: 16 })
 
         coordinator.stop()
     })
 
-    it("re-emits an identical reference once the cooldown has expired", () => {
+    // The cooldown suppresses re-projecting what is ALREADY on screen - not returning to a
+    // passage the projection has moved past. A re-quoted Psalm 119:1 once sat stuck behind the
+    // v6 the reading had advanced to for the rest of a 90s window.
+    it("suppresses a repeat only while the reference is live (or within the same-breath floor)", () => {
         const onDetection = vi.fn()
         const coordinator = createCoordinator(onDetection)
 
-        coordinator.onTranscriptSegment({ text: "please turn to john chapter three verse sixteen", startMs: 0, endMs: 3000 })
+        coordinator.onTranscriptSegment({ text: "please turn to john chapter three verse sixteen", startMs: 0, endMs: 3000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
 
-        // still within the 90s cooldown -> suppressed
-        vi.advanceTimersByTime(60_000)
-        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen again", startMs: 60_000, endMs: 63_000 })
+        // the same breath ("John 3:16... John 3:16!") - suppressed even with nothing live yet
+        vi.advanceTimersByTime(10_000)
+        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen again", startMs: 10_000, endMs: 13_000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
 
-        // cooldown expired (last emission was 91s ago) -> emitted again
-        vi.advanceTimersByTime(31_000)
-        coordinator.onTranscriptSegment({ text: "back to john chapter three verse sixteen", startMs: 91_000, endMs: 94_000 })
+        // it projected and is live on the output - repeats stay suppressed for the whole cooldown
+        coordinator.updateContext({ book: "John", bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+        vi.advanceTimersByTime(50_000)
+        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen once more", startMs: 60_000, endMs: 63_000, utteranceEnd: true })
+        expect(onDetection).toHaveBeenCalledTimes(1)
+
+        // the projection moved on (another passage is live) - a re-mention re-emits inside the
+        // 90s window, because putting it back up is a CHANGE of output, not a duplicate
+        coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 28, verseEnd: 28 })
+        vi.advanceTimersByTime(10_000)
+        coordinator.onTranscriptSegment({ text: "back to john chapter three verse sixteen", startMs: 70_000, endMs: 73_000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(2)
         expect(onDetection.mock.calls[1][0]).toMatchObject({ bookNumber: 43, chapter: 3, verseStart: 16 })
 
@@ -432,13 +533,14 @@ describe("DetectionCoordinator", () => {
         const coordinator = createCoordinator(onDetection)
 
         coordinator.stop()
-        coordinator.onTranscriptSegment({ text: "john 3:16", startMs: 0, endMs: 1000 })
+        coordinator.onTranscriptSegment({ text: "john 3:16", startMs: 0, endMs: 1000, utteranceEnd: true })
         expect(onDetection).not.toHaveBeenCalled()
     })
 
     // filler speech with no book names, so tier 1 stays quiet & the LLM word threshold (15) is reached
     const words = (count: number) => Array.from({ length: count }, (_unused, i) => "word" + i).join(" ")
-    const seg = (text: string, startMs: number) => ({ text, startMs, endMs: startMs + 5000 })
+    // a complete spoken utterance, which is what carries utteranceEnd from either transcriber
+    const seg = (text: string, startMs: number) => ({ text, startMs, endMs: startMs + 5000, utteranceEnd: true })
 
     function llmCoordinator(onDetection: (ref: any) => void = vi.fn(), onStatus: (state: any, extra?: any) => void = vi.fn()) {
         return new DetectionCoordinator({ books: BOOKS, llm: { provider: "openai", model: "gpt-4o-mini" }, getApiKey: () => "test-key", onDetection, onStatus })
@@ -597,12 +699,63 @@ describe("DetectionCoordinator", () => {
     })
 
     describe("anchor context (bounded session context)", () => {
+        // Reading straight through, the next verse is often cued by its number alone: "...with
+        // all boldness. Thirty one. And when they had prayed..." (live service, Acts 4 - verse
+        // 31 was only caught later by the quote matcher)
+        describe("bare next-verse number while reading", () => {
+            it("advances on the number that is exactly the next verse", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                coordinator.updateContext({ book: "Acts", bookNumber: 44, chapter: 4, verseStart: 29, verseEnd: 30 })
+
+                coordinator.onTranscriptSegment({ text: "now thirty one and when they had prayed", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).toHaveBeenCalledTimes(1)
+                expect(onDetection.mock.calls[0][0]).toMatchObject({ bookNumber: 44, chapter: 4, verseStart: 31, verseEnd: 31, confidence: "high" })
+
+                coordinator.stop()
+            })
+
+            it("ignores every number that is not the next verse", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                coordinator.updateContext({ book: "Acts", bookNumber: 44, chapter: 4, verseStart: 29, verseEnd: 30 })
+
+                coordinator.onTranscriptSegment({ text: "there were forty people and three thousand were saved and 12 apostles", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).not.toHaveBeenCalled()
+
+                coordinator.stop()
+            })
+
+            it("never advances past the chapter's last verse", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                // John 3 has 36 verses - anchored at its end, "thirty seven" is not a verse
+                coordinator.updateContext({ book: "John", bookNumber: 43, chapter: 3, verseStart: 36, verseEnd: 36 })
+
+                coordinator.onTranscriptSegment({ text: "thirty seven people came forward", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).not.toHaveBeenCalled()
+
+                coordinator.stop()
+            })
+
+            it("leaves 'chapter <next>' to the chapter rules", () => {
+                const onDetection = vi.fn()
+                const coordinator = createCoordinator(onDetection)
+                coordinator.updateContext({ book: "Acts", bookNumber: 44, chapter: 4, verseStart: 30, verseEnd: 30 })
+
+                coordinator.onTranscriptSegment({ text: "over in chapter thirty one of another book", startMs: 0, endMs: 2000, utteranceEnd: true })
+                expect(onDetection).not.toHaveBeenCalled()
+
+                coordinator.stop()
+            })
+        })
+
         it("resolves bare 'verse N' mentions against the anchor", () => {
             const onDetection = vi.fn()
             const coordinator = createCoordinator(onDetection)
             coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 1, verseEnd: 4 })
 
-            coordinator.onTranscriptSegment({ text: "now look at verse twelve", startMs: 0, endMs: 2000 })
+            coordinator.onTranscriptSegment({ text: "now look at verse twelve", startMs: 0, endMs: 2000, utteranceEnd: true })
             expect(onDetection).toHaveBeenCalledTimes(1)
             expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 12, verseEnd: 12, type: "explicit", source: "regex", confidence: "high", quote: "verse 12" })
 
@@ -614,7 +767,7 @@ describe("DetectionCoordinator", () => {
             const coordinator = createCoordinator(onDetection)
             coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 1, verseEnd: 1 })
 
-            coordinator.onTranscriptSegment({ text: "let us look at verses three to five together", startMs: 0, endMs: 2000 })
+            coordinator.onTranscriptSegment({ text: "let us look at verses three to five together", startMs: 0, endMs: 2000, utteranceEnd: true })
             expect(onDetection).toHaveBeenCalledTimes(1)
             expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 3, verseEnd: 5 })
 
@@ -625,7 +778,7 @@ describe("DetectionCoordinator", () => {
             const onDetection = vi.fn()
             const coordinator = createCoordinator(onDetection)
 
-            coordinator.onTranscriptSegment({ text: "now look at verse twelve", startMs: 0, endMs: 2000 })
+            coordinator.onTranscriptSegment({ text: "now look at verse twelve", startMs: 0, endMs: 2000, utteranceEnd: true })
             expect(onDetection).not.toHaveBeenCalled()
 
             coordinator.stop()
@@ -636,7 +789,7 @@ describe("DetectionCoordinator", () => {
             const coordinator = createCoordinator(onDetection)
             coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 1, verseEnd: 1 })
 
-            coordinator.onTranscriptSegment({ text: "he has fifteen verses about this", startMs: 0, endMs: 2000 })
+            coordinator.onTranscriptSegment({ text: "he has fifteen verses about this", startMs: 0, endMs: 2000, utteranceEnd: true })
             expect(onDetection).not.toHaveBeenCalled()
 
             coordinator.stop()
@@ -647,7 +800,7 @@ describe("DetectionCoordinator", () => {
             const coordinator = createCoordinator(onDetection)
             coordinator.updateContext({ book: "John", bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
 
-            coordinator.onTranscriptSegment({ text: "please turn to romans chapter eight verse twenty-eight", startMs: 0, endMs: 3000 })
+            coordinator.onTranscriptSegment({ text: "please turn to romans chapter eight verse twenty-eight", startMs: 0, endMs: 3000, utteranceEnd: true })
             expect(onDetection).toHaveBeenCalledTimes(1)
             expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 28 })
 
@@ -660,10 +813,201 @@ describe("DetectionCoordinator", () => {
             coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 1, verseEnd: 4 })
             coordinator.updateContext({ book: "John", bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
 
-            coordinator.onTranscriptSegment({ text: "now look at verse two", startMs: 0, endMs: 2000 })
+            coordinator.onTranscriptSegment({ text: "now look at verse two", startMs: 0, endMs: 2000, utteranceEnd: true })
             expect(onDetection).toHaveBeenCalledTimes(1)
             expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", bookNumber: 43, chapter: 3, verseStart: 2, verseEnd: 2 })
 
+            coordinator.stop()
+        })
+    })
+
+    describe("a reference still being spoken", () => {
+        // Measured on a real sermon before this guard existed: the preacher says "Romans 8:28",
+        // and because the streaming engine emits words as they settle, detection saw the prefix
+        // first - a complete reference on its own - then the half-finished number. Three passages
+        // projected in just over a second, two of them wrong.
+        //
+        // Segments here are INCREMENTAL, which is what the transcribers actually send: each one
+        // carries only the words that just settled, never a restatement of the whole utterance.
+        const spoken = ["turn with me to", "romans", "eight", "twenty", "eight"]
+
+        function speak(coordinator: DetectionCoordinator, words: string[], last?: { utteranceEnd?: boolean }) {
+            words.forEach((text, index) => coordinator.onTranscriptSegment({ text, startMs: index * 400, endMs: index * 400 + 400, ...(index === words.length - 1 ? last : {}) }))
+        }
+
+        it("projects nothing while the number is still growing", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            speak(coordinator, spoken)
+
+            expect(onDetection).not.toHaveBeenCalled()
+            coordinator.stop()
+        })
+
+        it("projects it, once and correctly, when the utterance closes", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            speak(coordinator, spoken, { utteranceEnd: true })
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "Romans", chapter: 8, verseStart: 28 })
+            coordinator.stop()
+        })
+
+        it("projects it as soon as the speaker says anything after it", () => {
+            // the common case in continuous preaching: no pause, but the reference stops being the
+            // last thing in the transcript, which is all the guard needs
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            speak(coordinator, [...spoken, "and read it with me"])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "Romans", chapter: 8, verseStart: 28 })
+            coordinator.stop()
+        })
+
+        it("holds a bare anchored verse for the same reason", () => {
+            // "verse 3" becomes "verse 33" exactly the way a full reference does
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+            coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 1, verseEnd: 4 })
+
+            coordinator.onTranscriptSegment({ text: "look at verse", startMs: 0, endMs: 400 })
+            coordinator.onTranscriptSegment({ text: "thirty", startMs: 400, endMs: 800 })
+            expect(onDetection).not.toHaveBeenCalled()
+
+            coordinator.onTranscriptSegment({ text: "three", startMs: 800, endMs: 1200, utteranceEnd: true })
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ chapter: 8, verseStart: 33 })
+            coordinator.stop()
+        })
+
+        it("costs nothing when the reference is not the last thing said", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            coordinator.onTranscriptSegment({ text: "romans eight twenty eight is where we are going", startMs: 0, endMs: 2000 })
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            coordinator.stop()
+        })
+    })
+
+    describe('"verse number N" is not the book of Numbers', () => {
+        // Found while marking real sermon audio: "want to look at verse number 12" projected
+        // Numbers 12, because "number" is that book's own name. Preachers use the phrasing
+        // constantly, so this was a false projection waiting to happen in every service.
+        // the shared BOOKS list has no Numbers, and the positive cases need it
+        const WITH_NUMBERS = [...BOOKS, { number: 4, canonNumber: 4, names: ["Numbers"] }]
+
+        const detect = (text: string) => {
+            const onDetection = vi.fn()
+            const coordinator = new DetectionCoordinator({ books: WITH_NUMBERS, llm: null, getApiKey: () => "", onDetection, onStatus: vi.fn() })
+            coordinator.updateContext({ book: "Hebrews", bookNumber: 58, chapter: 4, verseStart: 1, verseEnd: 1 })
+            coordinator.onTranscriptSegment({ text, startMs: 0, endMs: 3000, utteranceEnd: true })
+            // a chapter with no spoken verse waits to see whether one follows, so let the clock run
+            coordinator.onTranscriptSegment({ text: "amen", startMs: 9000, endMs: 10000, utteranceEnd: true })
+            coordinator.stop()
+            return onDetection.mock.calls.map((call) => call[0])
+        }
+
+        it("does not project Numbers for a bare 'verse number' mention", () => {
+            expect(detect("i want us to look at verse number twelve please").filter((ref) => ref.bookNumber === 4)).toEqual([])
+        })
+
+        it("resolves it against the open passage instead", () => {
+            // the whole point: the preacher does mean a verse, just not one in Numbers
+            const found = detect("i want us to look at verse number twelve please")
+            expect(found).toHaveLength(1)
+            expect(found[0]).toMatchObject({ book: "Hebrews", chapter: 4, verseStart: 12 })
+        })
+
+        it("does not project Numbers when a preacher counts aloud", () => {
+            // found on a second preacher's catalogue, whose messages are numbered lists ("Twelve
+            // Reasons Why...", "Ten Rules for..."), so counting aloud is constant. "number. One,
+            // two, three, four, five" was projecting Numbers 1:2.
+            expect(detect("all right number one two three four five").filter((ref) => ref.bookNumber === 4)).toEqual([])
+        })
+
+        it("still projects a real reference to Numbers", () => {
+            expect(detect("turn with me to numbers chapter twelve")[0]).toMatchObject({ bookNumber: 4, chapter: 12 })
+        })
+
+        it("still projects Numbers with a verse", () => {
+            expect(detect("numbers chapter twelve verse three")[0]).toMatchObject({ bookNumber: 4, chapter: 12, verseStart: 3 })
+        })
+    })
+
+    describe("a chapter with no spoken verse", () => {
+        // Measured on real sermons: "Ephesians chapter 2" projected Ephesians 2:1, then the preacher
+        // said "verse 8" and it corrected itself on screen. Verse 1 is this reference's DEFAULT, not
+        // a word anyone said, which is what separates it from a reference the speaker finished.
+        function feed(coordinator: DetectionCoordinator, parts: [string, number][]) {
+            parts.forEach(([text, endMs]) => coordinator.onTranscriptSegment({ text, startMs: endMs - 1000, endMs, utteranceEnd: true }))
+        }
+
+        it("is not projected while a verse may still follow", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [["turn with me to john chapter three", 2000]])
+
+            expect(onDetection).not.toHaveBeenCalled()
+            coordinator.stop()
+        })
+
+        it("is replaced by the fuller reference when the verse arrives", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [
+                ["turn with me to john chapter three", 2000],
+                ["verse sixteen for god so loved", 4000]
+            ])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", chapter: 3, verseStart: 16 })
+            coordinator.stop()
+        })
+
+        it("is projected once the wait passes with no verse", () => {
+            // the preacher really did mean the whole chapter
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [
+                ["turn with me to john chapter three", 2000],
+                ["and let us read it together slowly", 9000]
+            ])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", chapter: 3, verseStart: 1 })
+            coordinator.stop()
+        })
+
+        it("is projected when speech ends before the wait does", () => {
+            // the wait only ends when speech does, and a reference lost at the end of a session is
+            // worse than one shown a moment late
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [["turn with me to john chapter three", 2000]])
+            coordinator.stop()
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ book: "John", chapter: 3, verseStart: 1 })
+        })
+
+        it("does not delay a reference the speaker finished", () => {
+            const onDetection = vi.fn()
+            const coordinator = createCoordinator(onDetection)
+
+            feed(coordinator, [["turn with me to john chapter three verse sixteen and read", 2000]])
+
+            expect(onDetection).toHaveBeenCalledTimes(1)
+            expect(onDetection.mock.calls[0][0]).toMatchObject({ chapter: 3, verseStart: 16 })
             coordinator.stop()
         })
     })

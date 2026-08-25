@@ -93,6 +93,15 @@ export const TUNING = {
     CONT_VERBATIM_DENSITY: 0.75,
     CONT_VERBATIM_COVERAGE: 0.8,
     CONT_VERBATIM_MATCHED: 6,
+    // an established reading (this many in-order advances) lets the NEXT verse advance on its
+    // opening alone: a run of consecutive tokens matching the verse start. Reading always begins
+    // at the verse's first words, so a prefix run is strong evidence at a fraction of a verse
+    CONT_FAST_STREAK: 2,
+    CONT_FAST_RUN: 3,
+    // same-ref translation grounding: the reading translation keeps the emission when it carries
+    // at least this fraction of the top candidate's matched weight - span-relative score gaps
+    // between translations of the SAME verse are length/idf artifacts, not wording evidence
+    GROUNDED_WEIGHT_RATIO: 0.8,
 
     ANCHOR_BONUS_Z0: 0.1, // same book+chapter as the live passage
     ANCHOR_BONUS_Z1: 0.05, // same book, +-1 chapter
