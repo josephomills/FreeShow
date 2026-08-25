@@ -93,6 +93,32 @@ describe("QuoteMatcher", () => {
         })
     })
 
+    // For the SAME verse, span-relative score gaps between translations are length/idf
+    // artifacts: a shorter verse scores higher on identical matched words. A preacher jumping
+    // to another verse is overwhelmingly still reading the same bible - the reading translation
+    // keeps the emission unless the wording genuinely lives elsewhere.
+    it("keeps a same-verse match in the reading translation despite a shorter rival verse", () => {
+        const kjv = [verse(40, 20, 9, "and when they came that were hired about the eleventh hour they received every man a penny"), verse(43, 3, 16, "for god so loved the world that he gave his only begotten son that whosoever believeth in him should not perish but have everlasting life"), verse(1, 1, 1, "in the beginning god created the heaven and the earth"), verse(19, 23, 1, "the lord is my shepherd i shall not want")]
+        // same verse, much shorter wording built from the same key tokens - its span-relative
+        // score flatters any shared fragment
+        const terse = [verse(40, 20, 9, "those hired about the eleventh hour received a penny"), verse(43, 3, 16, "god loved the world so much he gave his only son so believers never perish but live forever"), verse(1, 1, 1, "first god created sky and earth"), verse(19, 23, 1, "the lord shepherds me i lack nothing")]
+        const pad = [
+            verse(40, 5, 3, "blessed are the poor in spirit for theirs is the kingdom of heaven"),
+            verse(40, 5, 4, "blessed are they that mourn for they shall be comforted"),
+            verse(45, 8, 28, "and we know that all things work together for good to them that love god"),
+            verse(45, 12, 1, "i beseech you therefore brethren by the mercies of god that ye present your bodies a living sacrifice"),
+            verse(66, 21, 4, "and god shall wipe away all tears from their eyes and there shall be no more death"),
+            verse(23, 40, 31, "but they that wait upon the lord shall renew their strength they shall mount up with wings as eagles"),
+            verse(50, 4, 13, "i can do all things through christ which strengtheneth me"),
+            verse(43, 14, 6, "jesus saith unto him i am the way the truth and the life no man cometh unto the father but by me")
+        ]
+        const matcher = new QuoteMatcher([buildTranslationIndex("kjv", [...kjv, ...pad]), buildTranslationIndex("terse", [...terse, ...pad])])
+
+        const out = matcher.onSegment(seg("the bible says hired about the eleventh hour and received every man a penny"))
+        expect(out).toHaveLength(1)
+        expect(out[0]).toMatchObject({ book: 40, chapter: 20, verseStart: 9, translationId: "kjv" })
+    })
+
     // Two verses of one chapter share a distinctive phrase ("about the eleventh hour" lives in
     // Matthew 20:6 AND 20:9). A preacher read v6, then repeated the phrase for emphasis
     // ("everybody say: what is the time?") - and the repeats pumped v9 over the sustain bar,

@@ -894,7 +894,15 @@ export class QuoteMatcher {
         const grounded = pool.find((candidate) => candidate.index.translationId === this.stickyTranslationId && sameRef(candidate, chosen))
         if (!grounded) return chosen
         const qualifies = meetsFloors(grounded.align, this.tuning) || phraseEvidence(grounded.align, this.tuning)
-        return qualifies && grounded.effectiveScore >= chosen.effectiveScore - this.tuning.TOP_TIE_BAND ? grounded : chosen
+        if (!qualifies) return chosen
+        // for the SAME verse, span-relative score differences between translations are mostly
+        // artifacts - a shorter verse scores higher on the same matched phrase, and each corpus
+        // weighs the words differently. What decides is matched EVIDENCE: only when the spoken
+        // wording genuinely lives in the other translation (the reading translation's alignment
+        // collapses) does the switch happen. A preacher jumping to another verse is overwhelmingly
+        // still reading the same bible
+        const comparableEvidence = grounded.align.matchedWeight >= chosen.align.matchedWeight * this.tuning.GROUNDED_WEIGHT_RATIO
+        return comparableEvidence || grounded.effectiveScore >= chosen.effectiveScore - this.tuning.TOP_TIE_BAND ? grounded : chosen
     }
 
     private emit(chosen: Candidate, confidence: "high" | "medium", kind: QuoteMatchEmission["kind"], nowMs: number, skipLedger = false, pool: Candidate[] = []): QuoteMatchEmission {
