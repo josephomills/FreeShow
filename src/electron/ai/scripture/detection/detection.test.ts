@@ -117,6 +117,46 @@ describe("spoken translation after a reference", () => {
     })
 })
 
+// Chapters above 99 read digit by digit - "Psalm one one nine" is 119. From a live service
+// where that spoken form triggered nothing: it normalized to "psalm 1 1 9" and parsed as 1:1.
+describe("digit-read chapters (psalm one one nine)", () => {
+    const psalmIndex = () => buildBookIndex(BOOKS)
+    const refs = (text: string) => matchReferences(normalizeSpokenNumbers(text), psalmIndex())
+
+    it("reads 'psalm one one nine verse one' as Psalm 119:1", () => {
+        expect(refs("psalm one one nine verse one")[0]).toMatchObject({ bookNumber: 19, chapter: 119, verseStart: 1, confidence: "high" })
+    })
+
+    it("coalesces the chapter even with an interjection before the verse (bare chapter, held for its verse)", () => {
+        // the live phrasing: the verse arrives later and resolves through the bare-chapter hold
+        expect(refs("now psalm one one nine we're going to read from verse one")[0]).toMatchObject({ bookNumber: 19, chapter: 119, bareChapter: true })
+    })
+
+    it("reads 'psalm one nineteen verse six' as Psalm 119:6 (1:19 does not exist)", () => {
+        expect(refs("psalm one nineteen verse six")[0]).toMatchObject({ bookNumber: 19, chapter: 119, verseStart: 6 })
+    })
+
+    it("keeps 'psalm one three' as Psalm 1:3 - both readings are real, the literal one wins", () => {
+        expect(refs("psalm one three")[0]).toMatchObject({ bookNumber: 19, chapter: 1, verseStart: 3 })
+    })
+
+    it("reads 'psalm chapter one one nine' through the chapter word", () => {
+        expect(refs("psalm chapter one one nine verse two")[0]).toMatchObject({ bookNumber: 19, chapter: 119, verseStart: 2 })
+    })
+
+    it("never coalesces for a book without such chapters", () => {
+        // john 1:19 exists and john has 21 chapters - "1 1 9" stays a literal reading
+        const out = refs("john one one nine")
+        expect(out[0]).toMatchObject({ bookNumber: 43, chapter: 1, verseStart: 1 })
+    })
+
+    it("never coalesces past the book's last chapter", () => {
+        // "psalm 1 9 9" -> 199 > 150 stays literal, and the literal 1:9 then fails verse
+        // bounds (Psalm 1 has 6 verses) - an honest nothing rather than a guessed chapter
+        expect(refs("psalm one nine nine")).toHaveLength(0)
+    })
+})
+
 describe("detectExplicitReferences", () => {
     it("detects spoken chapter+verse cues with high confidence", () => {
         const refs = detectExplicitReferences("please turn to john chapter three verse sixteen", BOOKS)
@@ -456,21 +496,32 @@ describe("DetectionCoordinator", () => {
         coordinator.stop()
     })
 
-    it("re-emits an identical reference once the cooldown has expired", () => {
+    // The cooldown suppresses re-projecting what is ALREADY on screen - not returning to a
+    // passage the projection has moved past. A re-quoted Psalm 119:1 once sat stuck behind the
+    // v6 the reading had advanced to for the rest of a 90s window.
+    it("suppresses a repeat only while the reference is live (or within the same-breath floor)", () => {
         const onDetection = vi.fn()
         const coordinator = createCoordinator(onDetection)
 
         coordinator.onTranscriptSegment({ text: "please turn to john chapter three verse sixteen", startMs: 0, endMs: 3000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
 
-        // still within the 90s cooldown -> suppressed
-        vi.advanceTimersByTime(60_000)
-        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen again", startMs: 60_000, endMs: 63_000, utteranceEnd: true })
+        // the same breath ("John 3:16... John 3:16!") - suppressed even with nothing live yet
+        vi.advanceTimersByTime(10_000)
+        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen again", startMs: 10_000, endMs: 13_000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(1)
 
-        // cooldown expired (last emission was 91s ago) -> emitted again
-        vi.advanceTimersByTime(31_000)
-        coordinator.onTranscriptSegment({ text: "back to john chapter three verse sixteen", startMs: 91_000, endMs: 94_000, utteranceEnd: true })
+        // it projected and is live on the output - repeats stay suppressed for the whole cooldown
+        coordinator.updateContext({ book: "John", bookNumber: 43, chapter: 3, verseStart: 16, verseEnd: 16 })
+        vi.advanceTimersByTime(50_000)
+        coordinator.onTranscriptSegment({ text: "john chapter three verse sixteen once more", startMs: 60_000, endMs: 63_000, utteranceEnd: true })
+        expect(onDetection).toHaveBeenCalledTimes(1)
+
+        // the projection moved on (another passage is live) - a re-mention re-emits inside the
+        // 90s window, because putting it back up is a CHANGE of output, not a duplicate
+        coordinator.updateContext({ book: "Romans", bookNumber: 45, chapter: 8, verseStart: 28, verseEnd: 28 })
+        vi.advanceTimersByTime(10_000)
+        coordinator.onTranscriptSegment({ text: "back to john chapter three verse sixteen", startMs: 70_000, endMs: 73_000, utteranceEnd: true })
         expect(onDetection).toHaveBeenCalledTimes(2)
         expect(onDetection.mock.calls[1][0]).toMatchObject({ bookNumber: 43, chapter: 3, verseStart: 16 })
 

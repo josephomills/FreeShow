@@ -21,6 +21,9 @@ export interface BookIndex {
     // anchored tail regex over the installed translations' spoken names, and name -> bible id
     translationTailRegex: RegExp | null
     translationByToken: Map<string, string>
+    // digit-read chapters above 99 ("psalm one one nine" -> 119), built only from books that
+    // have such chapters - see coalesceDigitReadChapters
+    digitChapterRegex: RegExp | null
 }
 
 // a spoken "8 18" often reaches us as "818". Recover the pair when the number cannot be a chapter of this book,
@@ -151,7 +154,13 @@ export function buildBookIndex(books: AiScriptureBook[], translations: AiScriptu
     const translationNames = [...translationByToken.keys()].sort((a, b) => b.length - a.length).map((token) => escapeRegex(token).replace(/ /g, "\\s+"))
     const translationTailRegex = translationNames.length ? new RegExp("^\\s*[,.]?\\s*(?:in\\s+|from\\s+)?(?:the\\s+)?(?:[a-z']+\\s+)?(?<name>" + translationNames.join("|") + ")\\b") : null
 
-    return { regex, chapterFirstRegex, verseFirstRegex, psalmOrdinalRegex, singleChapterVerseRegex, byToken, bookPattern: patterns.join("|"), bookWords: Array.from(bookWords), allBookWords: Array.from(allBookWords), translationTailRegex, translationByToken }
+    // chapters above 99 are commonly read digit by digit: "Psalm one one nine" is 119. Only a
+    // book that HAS such chapters can mean that (Psalms alone in the canon), so the rewrite is
+    // built solely from those book tokens - "john 1 1 9" is left exactly as spoken
+    const bigChapterTokens = tokens.filter((token) => (byToken.get(token)?.chapterCount || 0) > 99)
+    const digitChapterRegex = bigChapterTokens.length ? new RegExp("(?<lead>(?:^|[^a-z0-9])(?<book>" + bigChapterTokens.map((token) => escapeRegex(token).replace(/ /g, "\\s+")).join("|") + ")[,.]?\\s+(?:chapter\\s+(?:number\\s+)?)?)1\\s+(?:(?<a>\\d)\\s+(?<b>\\d)|(?<ab>\\d\\d))\\b(?!\\s*:)", "g") : null
+
+    return { regex, chapterFirstRegex, verseFirstRegex, psalmOrdinalRegex, singleChapterVerseRegex, byToken, bookPattern: patterns.join("|"), bookWords: Array.from(bookWords), allBookWords: Array.from(allBookWords), translationTailRegex, translationByToken, digitChapterRegex }
 }
 
 interface ReferenceMatch {
@@ -198,10 +207,47 @@ interface ReferenceGroups {
     e4?: string
 }
 
+/**
+ * Chapters above 99 are commonly read digit by digit: "Psalm one one nine" is Psalm 119, and
+ * "Psalm one nineteen" the same. After number normalization those arrive as "psalm 1 1 9" and
+ * "psalm 1 19", which the grammar reads as Psalm 1:1 and Psalm 1:19 - the second of which does
+ * not even exist (Psalm 1 has 6 verses). From a live service where exactly this made a spoken
+ * "Psalm one one nine ... verse one" trigger nothing at all.
+ *
+ * Only a book that HAS chapters above 99 can mean this (Psalms alone in the canon), so the
+ * regex is built solely from those book tokens. Two spoken shapes:
+ *   "1 d d"  (three digits read out) - coalesced whenever the result is a real chapter
+ *   "1 dd"   ("one nineteen")        - coalesced only when the literal chapter:verse reading
+ *            is impossible by verse bounds, so "psalm 1 3" stays Psalm 1:3
+ */
+function coalesceDigitReadChapters(text: string, index: BookIndex): string {
+    if (!index.digitChapterRegex) return text
+
+    index.digitChapterRegex.lastIndex = 0
+    return text.replace(index.digitChapterRegex, (whole, ...args) => {
+        const groups = args[args.length - 1] as { lead: string; book: string; a?: string; b?: string; ab?: string }
+        const book = index.byToken.get(groups.book.replace(/\s+/g, " "))
+        if (!book) return whole
+
+        const coalesced = parseInt("1" + (groups.ab ?? groups.a! + groups.b!), 10)
+        if (coalesced > book.chapterCount) return whole
+
+        // "1 19" can be a real chapter-and-verse ("psalm 1 3") - only an impossible verse tips
+        // the reading to a digit-read chapter. "1 d d" has no plausible literal reading at all
+        if (groups.ab !== undefined) {
+            const literalVerse = parseInt(groups.ab, 10)
+            const chapterOneLength = maxVerseInChapter(book.number, 1)
+            if (chapterOneLength > 0 && literalVerse <= chapterOneLength) return whole
+        }
+
+        return groups.lead + String(coalesced)
+    })
+}
+
 export function matchReferences(text: string, index: BookIndex): ReferenceMatch[] {
     if (!index.regex) return []
 
-    const normalized = correctBookMishearings(collapseStutteredBookNames(normalizeSpokenNumbers(text), index.allBookWords), index.bookWords)
+    const normalized = coalesceDigitReadChapters(correctBookMishearings(collapseStutteredBookNames(normalizeSpokenNumbers(text), index.allBookWords), index.bookWords), index)
     const results: ReferenceMatch[] = []
 
     // the specific spoken forms scan first - their spans are excluded from the general book-first
